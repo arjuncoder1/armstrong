@@ -12,4 +12,4 @@ tunnel=$!
 trap 'kill $tunnel 2>/dev/null' EXIT
 sleep 1
 kill -0 $tunnel 2>/dev/null || { echo "LiveKit tunnel to the Halo failed (port 7880 busy here?)"; exit 1; }
-PORTAL_HOTKEYS_GLOBAL=0 uv run --group hands hand-teleop --dashboard "$@"  # open the printed dashboard URL
+PORTAL_HOTKEYS_GLOBAL=0 uv run --group hands hand-teleop --dashboard --browser-port 8090 "$@"  # 8081 is often the Manifest teleop tunnel
