@@ -19,7 +19,7 @@ The grab RPC (`g` or Grab in hand-teleop) is shared autonomy: the operator steer
 object and types a task ("pick up the blue cube"), then Dream-1 does that task verbatim through
 Manifest's action, scoped to that arm (the other arm and its gripper hold). Manifest's action lasts at
 most 12 s, so the bridge renews it on the same task until Dream-1 ends it, GRAB_TOTAL_S pass, or a motor
-on that arm reaches HOT_C. Taking control stops it at once.
+on that arm reaches STOP_C. A grab never starts on an arm at START_MAX_C. Taking control stops it at once.
 """
 from __future__ import annotations
 
@@ -54,7 +54,11 @@ WIDTH = 640
 HOME_CONFIRMED = "grippers_empty"  # the home RPC payload: Manifest's native home opens both grippers
 GRAB_ROUND_S = 12.0  # one Manifest action: it allows 0.5-12 s, and each start waits 2-3 s for Dream-1's first chunk
 GRAB_TOTAL_S = env_float("GRAB_TOTAL_S", 60.0)  # Dream-1's running time for one grab, across renewals
-HOT_C = 55.0  # Manifest warns at this and refuses to energize an arm this hot; the run itself stops at 65
+# Manifest warns at 55 C and refuses to energize an arm that hot; it stops a run at 65 C. A running grab (the
+# right lift idles at 51-52 C and reached 55 C 10 s into one) ends 5 C short of that, cleanly, not mid-motion.
+START_MAX_C = 55.0
+STOP_C = 60.0
+MOTORS = ("pan", "lift", "elbow", "wrist flex", "wrist yaw", "wrist roll", "gripper")  # motor_temps_c order
 
 
 def post(route: str, body: dict | None = None, timeout: float = 3.0) -> dict:
@@ -124,9 +128,11 @@ def grab_task(side: str, task: str) -> str:
     return task if side in task.lower() else f"{task.rstrip('.')}. Use the {side} arm."
 
 
-def hottest(measured: dict, side: str) -> float:
-    """The hottest motor on one arm, degrees C, or 0 when the station does not report temperatures."""
-    return max((t for t in measured.get(side, {}).get("motor_temps_c") or [] if t is not None), default=0.0)
+def hottest(measured: dict, side: str) -> tuple[float, str]:
+    """One arm's hottest motor, (degrees C, name), or (0, "") when the station does not report temperatures."""
+    temps = [(t, MOTORS[i] if i < len(MOTORS) else f"motor {i}")
+             for i, t in enumerate(measured.get(side, {}).get("motor_temps_c") or []) if t is not None]
+    return max(temps, default=(0.0, ""))
 
 
 class Grab:
@@ -141,17 +147,20 @@ class Grab:
         self.stop = threading.Event()
         self.line = f"Dream-1 is starting on the {side} arm: {self.task}"
 
-    def hot(self) -> float:
-        temp = hottest(self.measured(), self.side)
-        return temp if temp >= HOT_C else 0.0
+    def hot(self) -> str:
+        """Why this arm is too hot to keep going, or "" """
+        temp, motor = hottest(self.measured(), self.side)
+        if temp < STOP_C:
+            return ""
+        return f"its {motor} motor is at {temp:.0f} C (Manifest stops runs at 65); let it rest under {START_MAX_C:.0f} C"
 
     def run(self) -> str:
         started = time.monotonic()
         while True:
             if self.stop.is_set():
                 return f"Dream-1 stopped on the {self.side} arm: an operator took control"
-            if temp := self.hot():
-                return f"Dream-1 stopped on the {self.side} arm: a motor is at {temp:.0f} C, let it rest"
+            if why := self.hot():
+                return f"Dream-1 stopped on the {self.side} arm: {why}"
             left = GRAB_TOTAL_S - (time.monotonic() - started)
             if left < 1.0:
                 return f"Dream-1 stopped on the {self.side} arm after {GRAB_TOTAL_S:.0f} s; c takes control"
@@ -162,7 +171,9 @@ class Grab:
             reason = self.follow(lease, started)
             if reason == "operator_stop":
                 return f"Dream-1 stopped on the {self.side} arm: an operator took control"
-            if reason != "duration_complete":  # Dream-1 ended it, the station stopped it, or heat
+            if reason.startswith("its "):  # heat, from follow()
+                return f"Dream-1 stopped on the {self.side} arm: {reason}"
+            if reason != "duration_complete":  # Dream-1 ended it, or the station stopped it
                 return f"Dream-1 ended on the {self.side} arm ({reason}); c takes control"
 
     def follow(self, lease: dict, started: float) -> str:
@@ -171,10 +182,10 @@ class Grab:
         try:
             while lease.get("active"):
                 stopped = self.stop.wait(0.5)
-                temp = 0.0 if stopped else self.hot()
-                if stopped or temp:
+                why = "" if stopped else self.hot()
+                if stopped or why:
                     post("/supervisor/stop", {"lease_id": ident})
-                    return "operator_stop" if stopped else f"a motor at {temp:.0f} C, let it rest"
+                    return "operator_stop" if stopped else why
                 lease = post("/supervisor/heartbeat", {"lease_id": ident})["lease"]
                 self.line = f"Dream-1 on the {self.side} arm, {time.monotonic() - started:.0f} s: {self.task}"
             return lease.get("reason") or "ended"
@@ -274,8 +285,9 @@ async def main() -> None:
             return f"{holder} has control: only they can hand an arm to Dream-1"
         if is_grabbing() or grab_from or is_homing() or home_from:
             return "busy: a grab or home is already running"
-        if (temp := hottest(measured, side)) >= HOT_C:
-            return f"the {side} arm has a motor at {temp:.0f} C: let it rest under {HOT_C:.0f} C first"
+        temp, motor = hottest(measured, side)
+        if temp >= START_MAX_C:
+            return f"the {side} arm's {motor} motor is at {temp:.0f} C: let it rest under {START_MAX_C:.0f} C first"
         grab_from = (data.caller_identity, side, thing)
         return f"Dream-1 takes the {side} arm: {grab_task(side, thing)} (c takes it back)"
 
