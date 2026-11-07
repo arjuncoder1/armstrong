@@ -80,6 +80,15 @@ for ops in spec["paths"].values():
                 content["schema"] = {"$ref": "#/components/schemas/ErrorResponse"}
             elif schema == {"type": "object"}:
                 content["schema"] = {"$ref": "#/components/schemas/JsonObject"}
+# The spec only lists 200, but e.g. POST /tasks answers 202 ("202 with the task record"); without this the
+# client parses a 202 as an error. Accept 201/202 with the 200 body everywhere.
+for ops in spec["paths"].values():
+    for op in ops.values():
+        responses = op.get("responses", {})
+        if "200" in responses:
+            for code in ("201", "202"):
+                responses.setdefault(code, responses["200"])
+
 schemas["ErrorResponse"] = {"type": "object", "properties": {"error": {"$ref": "#/components/schemas/ApiError"}}}
 schemas["JsonObject"] = {"type": "object", "additionalProperties": True,
                          "description": "Manifest's JSON reply; the spec does not type it further."}

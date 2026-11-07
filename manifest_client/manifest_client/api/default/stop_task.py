@@ -42,6 +42,20 @@ def _parse_response(*, client: Client, response: httpx2.Response) -> ErrorRespon
 
         return response_200
 
+    if response.status_code == 201:
+        response_201 = JsonObject.from_dict(response.json())
+
+
+
+        return response_201
+
+    if response.status_code == 202:
+        response_202 = JsonObject.from_dict(response.json())
+
+
+
+        return response_202
+
     response_default = ErrorResponse.from_dict(response.json())
 
 
