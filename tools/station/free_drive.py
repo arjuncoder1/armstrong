@@ -335,8 +335,10 @@ class FreeDrive:
             if b.teaching.active:
                 raise ValueError("Teaching runs Zero-G itself; stop teaching first")
             rest = getattr(b, "rest", None)
-            if rest is not None and side in rest.resting:
-                raise ValueError(f"The {side} arm's torque is off; turn it on first")
+            if rest is not None and side in rest.resting:  # torque is off: Torque ON first (reopens holding where it is)
+                b.api.call(rest.wake({"arm": side}))
+                if side in rest.resting:
+                    raise ValueError(f"The {side} arm's torque did not come back on")
         if not 0.0 < scale <= 1.0:
             raise ValueError("scale must be in (0, 1]")
         d = self._driver(side)

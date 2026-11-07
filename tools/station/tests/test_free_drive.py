@@ -242,5 +242,21 @@ sim, drv = make(); c = engage(drv, sim)
 sim.ext[0] = 3.0; run(drv, sim, 1.5); sim.ext[0] = 0
 check("too fast trips off", c.state == "off" and "faster" in c.why, c.why)
 
+# Zero-G on an arm whose torque is off: Torque ON (arm_rest wake) first, then weightless
+import asyncio
+sim, drv = make()
+class Rest:
+    def __init__(self): self.resting = {"right": 1.0}
+    async def wake(self, body): self.resting.pop(body["arm"], None); return {}
+class Api:
+    def call(self, coro): return asyncio.run(coro)
+bridge = types.SimpleNamespace(c=types.SimpleNamespace(_arms={"right": types.SimpleNamespace(_driver=drv)}), rest=Rest(),
+                               api=Api(), cv=types.SimpleNamespace(busy=False), lease=None,
+                               teaching=types.SimpleNamespace(active=False))
+F = fd.FreeDrive(bridge)
+ticker = threading.Thread(target=lambda: run(drv, sim, 2.0)); ticker.start()
+out = F.route({"arm": "right", "on": True}); ticker.join()
+check("Zero-G on a torque-off arm wakes it, then engages", bridge.rest.resting == {} and out["free_drive"]["active"] == ["right"], str(out))
+
 print("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")
 sys.exit(1 if fails else 0)
