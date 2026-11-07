@@ -8,10 +8,17 @@ dependencies = [
     "livekit-agents~=1.8",
     "livekit-plugins-ai-coustics~=0.3",
     "loguru>=0.7.3",
+    "manifest-client",
 ]
 
 [tool.uv.sources]
 portal-makermods = { path = "thirdparty/portal-makermods", editable = true }
+manifest-client = { workspace = true, editable = true }
+
+[tool.uv.workspace]
+members = [
+    "manifest_client",
+]
 
 [tool.uv]
 # Copied from portal-makermods: uv only applies overrides from the root project.

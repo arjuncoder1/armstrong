@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SSH into a machine from .env.ssh with its password. Password auth only; keys are never used.
 #
+#   tools/ssh.sh                     # interactive shell on "robot" (the default machine)
 #   tools/ssh.sh <name>              # interactive shell
 #   tools/ssh.sh <name> <command...> # run a command
 #   tools/ssh.sh --list              # configured names
@@ -21,9 +22,20 @@ self="$root/tools/ssh.sh"
 
 get() { [[ -f "$file" ]] && grep -m1 "^$1=" "$file" | cut -d= -f2- || true; }
 
-if [[ $# -eq 0 ]]; then
-  echo "usage: tools/ssh.sh <name> [command...] | --list" >&2
-  exit 2
+[[ $# -eq 0 ]] && set -- robot  # default machine
+
+# --tunnel <remote_port>[:<local_port>] [name]: forward localhost:<local_port> here to <remote_port> on the machine,
+# wherever it listens there (localhost or its LAN address). Runs until Ctrl-C.
+if [[ "$1" == "--tunnel" ]]; then
+  [[ $# -ge 2 ]] || { echo "usage: tools/ssh.sh --tunnel <remote_port>[:<local_port>] [name]" >&2; exit 2; }
+  spec="$2"; machine="${3:-robot}"
+  remote_port="${spec%%:*}"; local_port="${spec#*:}"
+  bind="$("$self" "$machine" "ss -tlnH 'sport = :$remote_port'" 2>/dev/null | awk '{print $4}' | head -1)"
+  target="${bind%:*}"
+  case "$target" in ""|"*"|"0.0.0.0"|"[::]") target=127.0.0.1 ;; esac
+  [[ -n "$bind" ]] || echo "warning: nothing listening on port $remote_port on $machine yet" >&2
+  echo "tunnel: http://127.0.0.1:$local_port -> $machine:$remote_port (Ctrl-C to close)"
+  exec "$self" "$machine" -N -o ExitOnForwardFailure=yes -L "$local_port:$target:$remote_port"
 fi
 
 if [[ "$1" == "--list" ]]; then

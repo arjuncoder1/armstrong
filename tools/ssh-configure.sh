@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Add or update a machine in .env.ssh for tools/ssh.sh. Password auth only.
 #
-#   tools/ssh-configure.sh            # prompts for everything
+#   tools/ssh-configure.sh            # prompts for everything (name defaults to "robot")
 #   tools/ssh-configure.sh arm        # prompts for arm's details
 #
 # .env.ssh is git-ignored and kept at mode 600: it holds passwords.
@@ -11,8 +11,8 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 file="$root/.env.ssh"
 
 name="${1:-}"
-[[ -z "$name" ]] && read -rp "Machine name (e.g. arm, deploy): " name
-[[ -z "$name" ]] && { echo "a name is required" >&2; exit 1; }
+[[ -z "$name" ]] && read -rp "Machine name [robot]: " name
+name="${name:-robot}"
 key="SSH_$(printf '%s' "$name" | tr 'a-z-' 'A-Z_' | tr -c 'A-Z0-9_' '_')"
 
 read -rp "user@host: " host
