@@ -101,3 +101,6 @@ coverage.xml
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Cloned by setup.sh, not tracked
+thirdparty/

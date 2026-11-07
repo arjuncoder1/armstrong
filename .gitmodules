@@ -1,4 +1,0 @@
-[submodule "thirdparty/portal-makermods"]
-	path = thirdparty/portal-makermods
-	url = https://github.com/livekit-examples/portal-makermods.git
-	branch = dc/maker_arm

@@ -1,0 +1,22 @@
+[project]
+name = "armstrong"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "portal-makermods",
+    # portal-makermods' `voice` group: LiveKit Agents and ai-coustics noise cancellation.
+    "livekit-agents~=1.8",
+    "livekit-plugins-ai-coustics~=0.3",
+    "loguru>=0.7.3",
+]
+
+[tool.uv.sources]
+portal-makermods = { path = "thirdparty/portal-makermods", editable = true }
+
+[tool.uv]
+# Copied from portal-makermods: uv only applies overrides from the root project.
+# Keep the headless OpenCV build; exclude the GUI variants.
+override-dependencies = [
+    "opencv-python; python_version < '0'",
+    "opencv-contrib-python; python_version < '0'",
+]
