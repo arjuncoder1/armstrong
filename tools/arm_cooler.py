@@ -146,6 +146,8 @@ function needOk(){if(!document.getElementById('ok').checked){msg('Tick the box f
 function rest(side){if(needOk())post('rest',{arm:side,confirm_supported:true})}
 function wake(side){post('wake',{arm:side})}
 function swap(use){if(needOk())post('swap',{use,confirm_supported:true})}
+function restBoth(){if(needOk())post('rest',{arm:'both',confirm_supported:true})}
+function wakeBoth(){post('wake',{arm:'both'})}
 function render(){const a=document.getElementById('arms'),meta=document.getElementById('meta'),b=document.getElementById('banner');
  if(!S.ok){a.innerHTML='';meta.textContent='';b.style.display='block';b.style.background='var(--hot)';b.style.color='#fff';b.textContent='Station: '+S.error;return}
  meta.innerHTML=`<span>station <b>${S.state}</b></span><span>Manifest can use: <b>${S.enabled.join(' + ')||'none'}</b></span><span>${S.lease?'action running':'no action running'}</span><span>${S.addon?'rest add-on installed':'rest add-on NOT installed'}</span><span>${S.time}</span>`;
@@ -155,12 +157,13 @@ function render(){const a=document.getElementById('arms'),meta=document.getEleme
   html+=`<div class=card><div class=head><span class=side>${side} arm</span><span class=badge style="background:${st[1]}">${st[0]}${r&&secs!=null?' · '+Math.floor(secs/60)+'m'+String(secs%60).padStart(2,'0'):''}</span></div>
   <div class=max style="color:${color(A.max)}">${A.max??'–'}°C</div>`;
   A.temps.forEach((t,i)=>{html+=`<div class=m><span>${names[i]||'m'+i}</span><span class=bar><i style="width:${Math.min(100,Math.max(4,(t-25)/40*100))}%;background:${color(t)}"></i></span><span class=n>${t}°</span></div>`});
-  html+=r?`<button class=wake onclick="wake('${side}')">Wake ${side} (torque on)</button>`:`<button class=rest onclick="rest('${side}')" ${resting.length?'disabled':''}>Rest ${side} (torque off)</button>`;
+  html+=r?`<button class=wake onclick="wake('${side}')">Wake ${side} (torque on)</button>`:`<button class=rest onclick="rest('${side}')">Rest ${side} (torque off)</button>`;
   html+='</div>'}
  a.innerHTML=html;
  const sw=document.getElementById('swapbox');
  if(resting.length===1){const use=resting[0],other=use==='left'?'right':'left';
   sw.innerHTML=`<button class=swap onclick="swap('${use}')">Swap: wake ${use}, rest ${other}</button>`}else sw.innerHTML='';
+ sw.innerHTML+=` <button class=rest onclick="restBoth()" ${resting.length===2?'disabled':''}>Turn both OFF (torque off)</button> <button class=wake onclick="wakeBoth()" ${resting.length?'':'disabled'}>Turn both ON (torque on)</button>`;
  const L=S.arms.left.max,R=S.arms.right.max;let tip='';
  if(S.problem){tip='Station problem: '+S.problem}
  else if(resting.length===1){const use=resting[0],act=use==='left'?'right':'left';
