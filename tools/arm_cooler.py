@@ -3,8 +3,8 @@
     uv run tools/arm_cooler.py                 # opens a tunnel to the robot's station and serves http://127.0.0.1:8098
     STATION_URL=http://127.0.0.1:8091 python3 tools/arm_cooler.py    # on the robot itself: no tunnel
 
-Live temperatures of all 14 motors come from the station's /supervisor/preview (observation only). Rest/Wake
-call the station add-on in tools/station/arm_rest.py (POST /supervisor/arm/rest|wake); until that is installed
+Live temperatures of all 14 motors come from the station's /supervisor/preview (observation only). Rest/Wake (and Free drive / Hold here, the same
+torque-off and torque-on calls for moving an arm by hand) call the station add-on in tools/station/arm_rest.py (POST /supervisor/arm/rest|wake); until that is installed
 the buttons report it. Standard library only.
 
 The arms have no brakes: a rested arm goes LIMP. Rest it only when it is supported or at its rest pose.
@@ -58,7 +58,7 @@ def state() -> dict:
     rest = d.get("arm_rest")
     return {"ok": True, "mode": d.get("mode"), "state": st.get("state"), "problem": d.get("problem"),
             "enabled": d.get("enabled_arms") or [], "arms": arms, "addon": rest is not None,
-            "rest": rest or {"resting": [], "resting_s": {}, "awake": ["left", "right"]},
+            "rest": {"resting": [], "resting_s": {}, "locked": [], "awake": ["left", "right"], **(rest or {})},
             "lease": bool((d.get("lease") or {}).get("active")), "time": time.strftime("%H:%M:%S")}
 
 
@@ -72,7 +72,7 @@ def act(kind: str, body: dict) -> tuple[int, dict]:
         if code != 200:
             return code, d
         return station("/supervisor/arm/rest", {"arm": other, "confirm_supported": body.get("confirm_supported")})
-    path = {"rest": "/supervisor/arm/rest", "wake": "/supervisor/arm/wake"}[kind]
+    path = {"rest": "/supervisor/arm/rest", "wake": "/supervisor/arm/wake", "use": "/supervisor/arm/use"}[kind]
     code, d = station(path, body, timeout=30)
     if "Unsupported MakerArm operation" in str(d.get("error")):
         d = {"error": "The station add-on isn't installed on the robot yet (tools/station/arm_rest.py): "
@@ -99,7 +99,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         kind = self.path.rsplit("/", 1)[-1]
-        if kind not in ("rest", "wake", "swap"):
+        if kind not in ("rest", "wake", "swap", "use"):
             return self._send(404, b'{"error":"unknown"}')
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
         code, d = act(kind, body)
@@ -132,6 +132,7 @@ button:disabled{opacity:.4;cursor:default}.rest{background:#2c4a7a;color:#fff}.w
 <div class=bar2 id=meta></div><div id=banner></div>
 <div class=row id=arms></div>
 <div class=card style="margin-top:16px"><label><input type=checkbox id=ok> The arm I'm resting is supported or at its rest pose, and hands are clear.</label>
+<label><input type=checkbox id=hold> Free drive: I am holding the arm (motors fully off, <b>no gravity compensation</b>: it drops if I let go).</label>
 <div id=swapbox></div><div id=msg></div></div>
 <script>
 const color=t=>t==null?'var(--line)':t>=55?'var(--hot)':t>=48?'var(--warn)':'var(--ok)';
@@ -148,21 +149,29 @@ function wake(side){post('wake',{arm:side})}
 function swap(use){if(needOk())post('swap',{use,confirm_supported:true})}
 function restBoth(){if(needOk())post('rest',{arm:'both',confirm_supported:true})}
 function wakeBoth(){post('wake',{arm:'both'})}
+function use(arm){post('use',{arm})}
+function freeDrive(arm){if(!document.getElementById('hold').checked){msg('Free drive: tick "I am holding the arm" first. No gravity compensation: it drops if you let go.','var(--hot)');return}
+ post('rest',{arm,confirm_supported:true})}
 function render(){const a=document.getElementById('arms'),meta=document.getElementById('meta'),b=document.getElementById('banner');
  if(!S.ok){a.innerHTML='';meta.textContent='';b.style.display='block';b.style.background='var(--hot)';b.style.color='#fff';b.textContent='Station: '+S.error;return}
  meta.innerHTML=`<span>station <b>${S.state}</b></span><span>Manifest can use: <b>${S.enabled.join(' + ')||'none'}</b></span><span>${S.lease?'action running':'no action running'}</span><span>${S.addon?'rest add-on installed':'rest add-on NOT installed'}</span><span>${S.time}</span>`;
  const resting=S.rest.resting;let html='';
  for(const side of ['left','right']){const A=S.arms[side],r=resting.includes(side);
-  const st=r?['RESTING · torque off','#2c4a7a']:['ACTIVE','var(--ok)'];const secs=S.rest.resting_s[side];
+  const lk=(S.rest.locked||[]).includes(side);
+  const st=r?['RESTING · torque off','#2c4a7a']:lk?['LOCKED · holding, not for Manifest','var(--warn)']:['ACTIVE','var(--ok)'];const secs=S.rest.resting_s[side];
   html+=`<div class=card><div class=head><span class=side>${side} arm</span><span class=badge style="background:${st[1]}">${st[0]}${r&&secs!=null?' · '+Math.floor(secs/60)+'m'+String(secs%60).padStart(2,'0'):''}</span></div>
   <div class=max style="color:${color(A.max)}">${A.max??'–'}°C</div>`;
   A.temps.forEach((t,i)=>{html+=`<div class=m><span>${names[i]||'m'+i}</span><span class=bar><i style="width:${Math.min(100,Math.max(4,(t-25)/40*100))}%;background:${color(t)}"></i></span><span class=n>${t}°</span></div>`});
-  html+=r?`<button class=wake onclick="wake('${side}')">Wake ${side} (torque on)</button>`:`<button class=rest onclick="rest('${side}')">Rest ${side} (torque off)</button>`;
+  html+=r?`<button class=wake onclick="wake('${side}')">Hold here / wake ${side} (torque on)</button>`
+         :`<button class=rest onclick="rest('${side}')">Rest ${side} (torque off)</button> <button class=swap onclick="freeDrive('${side}')">Free drive ${side}</button>`;
   html+='</div>'}
  a.innerHTML=html;
  const sw=document.getElementById('swapbox');
  if(resting.length===1){const use=resting[0],other=use==='left'?'right':'left';
   sw.innerHTML=`<button class=swap onclick="swap('${use}')">Swap: wake ${use}, rest ${other}</button>`}else sw.innerHTML='';
+ const lockd=S.rest.locked||[];const cur=lockd.length===0?'both':lockd.length===1?(lockd[0]==='left'?'right':'left'):'none';
+ sw.innerHTML+=`<div style="margin-top:12px">Manifest uses: `+['left','right','both'].map(a=>`<button class=swap style="margin:4px;${cur===a?'outline:3px solid var(--ok)':''}" onclick="use('${a}')">${a}</button>`).join('')+` <span style="color:var(--mut);font-size:13px">(the other arm stays powered and holds)</span></div>`;
+ sw.innerHTML+=` <button class=swap onclick="freeDrive('both')" ${resting.length===2?'disabled':''}>Free drive both</button>`;
  sw.innerHTML+=` <button class=rest onclick="restBoth()" ${resting.length===2?'disabled':''}>Turn both OFF (torque off)</button> <button class=wake onclick="wakeBoth()" ${resting.length?'':'disabled'}>Turn both ON (torque on)</button>`;
  const L=S.arms.left.max,R=S.arms.right.max;let tip='';
  if(S.problem){tip='Station problem: '+S.problem}

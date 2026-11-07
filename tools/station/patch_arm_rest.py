@@ -13,8 +13,32 @@ from pathlib import Path
 MARK = "# arm_rest"
 target = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).with_name("makerarm_control.py"))
 src = target.read_text()
+
+# v1 -> v2 (Lock mode): hooks that only knew about resting arms now use held() = resting or locked.
+UPGRADES = [
+    ("  if self.rest.resting:d['enabled_arms']=[a for a in d['enabled_arms'] if a not in self.rest.resting];d['locked_arms']=sorted(self.rest.resting)  # arm_rest\n",
+     "  if self.rest.held():d['enabled_arms']=[a for a in d['enabled_arms'] if a not in self.rest.held()];d['locked_arms']=self.rest.held()  # arm_rest\n"),
+    ("  if self.rest.resting:raise ValueError('Wake the resting arm before homing')  # arm_rest\n",
+     "  if self.rest.held():raise ValueError('Wake or unlock the held arm before homing')  # arm_rest\n"),
+    ("   if route in ('/supervisor/cv/start','/reset','/supervisor/teach/start') and br.rest.resting:raise ValueError('Wake the resting arm first')  # arm_rest\n",
+     "   if route in ('/supervisor/cv/start','/reset','/supervisor/teach/start') and br.rest.held():raise ValueError('Wake or unlock the held arm first')  # arm_rest\n"),
+    ("   if route=='/supervisor/arm/rest':r=api.call(br.rest.rest(b))  # arm_rest\n",
+     "   if route=='/supervisor/arm/rest':r=api.call(br.rest.rest(b))  # arm_rest\n"
+     "   elif route in ('/supervisor/arm/lock','/supervisor/arm/unlock','/supervisor/arm/use'):r=api.call(getattr(br.rest,route.rsplit('/',1)[1])(b))  # arm_rest\n"),
+]
 if MARK in src:
-    print(f"{target}: already patched")
+    if "self.rest.held()" in src:
+        print(f"{target}: already patched (v2)")
+        sys.exit(0)
+    for old, _ in UPGRADES:
+        if src.count(old) != 1:
+            sys.exit(f"v1 hook not found exactly once, nothing changed:\n{old!r}")
+    for old, new in UPGRADES:
+        src = src.replace(old, new)
+    backup = target.with_name(f"{target.name}.bak-armrest-{time.strftime('%Y%m%dT%H%M%S')}")
+    shutil.copy2(target, backup)
+    target.write_text(src)
+    print(f"upgraded {target} to v2 (backup {backup.name})")
     sys.exit(0)
 
 HOOKS = [
@@ -31,7 +55,7 @@ HOOKS = [
     ("  if self.teaching.active:d['mode']='teaching';d['enabled_arms']=[a for a in ('left','right') if a!=self.teaching.session['arm']]\n",
      "  if self.teaching.active:d['mode']='teaching';d['enabled_arms']=[a for a in ('left','right') if a!=self.teaching.session['arm']]\n"
      "  d['arm_rest']=self.rest.public()  # arm_rest\n"
-     "  if self.rest.resting:d['enabled_arms']=[a for a in d['enabled_arms'] if a not in self.rest.resting];d['locked_arms']=sorted(self.rest.resting)  # arm_rest\n"),
+     "  if self.rest.held():d['enabled_arms']=[a for a in d['enabled_arms'] if a not in self.rest.held()];d['locked_arms']=self.rest.held()  # arm_rest\n"),
     # 4. Refuse actions that would drive the resting arm.
     ("  if self.teaching.active:raise ValueError('Finish teaching before movement')\n",
      "  if self.teaching.active:raise ValueError('Finish teaching before movement')\n"
@@ -39,11 +63,12 @@ HOOKS = [
     # 5. Native home walks both arms.
     ("  if self.teaching.active:raise ValueError('Finish teaching before homing')\n",
      "  if self.teaching.active:raise ValueError('Finish teaching before homing')\n"
-     "  if self.rest.resting:raise ValueError('Wake the resting arm before homing')  # arm_rest\n"),
+     "  if self.rest.held():raise ValueError('Wake or unlock the held arm before homing')  # arm_rest\n"),
     # 6. Routes; reset, CV teleop and teaching would drive or re-home the resting arm.
     ("   if route=='/supervisor/cv/start':r=api.call(br.cv.start())\n",
-     "   if route in ('/supervisor/cv/start','/reset','/supervisor/teach/start') and br.rest.resting:raise ValueError('Wake the resting arm first')  # arm_rest\n"
+     "   if route in ('/supervisor/cv/start','/reset','/supervisor/teach/start') and br.rest.held():raise ValueError('Wake or unlock the held arm first')  # arm_rest\n"
      "   if route=='/supervisor/arm/rest':r=api.call(br.rest.rest(b))  # arm_rest\n"
+     "   elif route in ('/supervisor/arm/lock','/supervisor/arm/unlock','/supervisor/arm/use'):r=api.call(getattr(br.rest,route.rsplit('/',1)[1])(b))  # arm_rest\n"
      "   elif route=='/supervisor/arm/wake':r=api.call(br.rest.wake(b))  # arm_rest\n"
      "   elif route=='/supervisor/cv/start':r=api.call(br.cv.start())\n"),
 ]
