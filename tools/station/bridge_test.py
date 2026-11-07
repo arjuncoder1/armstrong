@@ -2,12 +2,8 @@
 
 The fake station tracks each written target perfectly and applies the real station's lead check (0.12 rad).
 The operator waits for an observation, takes control, asks for a 0.3 rad jump on right joint2 and an open
-gripper, goes quiet (the bridge must not replay it), releases, then asks for home. Run from
-thirdparty/portal-makermods with PYTHONPATH=src, after starting the bridge in a test room:
-
-    LIVEKIT_ROOM=bridge-test MANIFEST_STATION_URL=http://127.0.0.1:18091 MAKERMODS_MODEL=makers \
-        PYTHONPATH=src .venv/bin/python src/manifest_bridge.py &
-    PYTHONPATH=src .venv/bin/python ../../tools/station/bridge_test.py bridge-test
+gripper, then releases. Run from ~/portal-makermods with PYTHONPATH=src, after starting the bridge with
+MANIFEST_STATION_URL=http://127.0.0.1:18091 in the same LIVEKIT_ROOM.
 """
 import asyncio
 import base64
@@ -26,6 +22,7 @@ Q = {"left": np.array([-0.054, -0.058, 0.024, -0.027, 0.111, 0.019]),
 GRIP = {"left": 0.5, "right": 0.5}
 LOG = {"starts": 0, "stops": 0, "heartbeats": 0, "writes": [], "refused": [], "homes": []}
 LEASE = {"id": None}
+CV_START_S = 4.5  # the real station readies its IK this long before cv/start answers
 JPEG = base64.b64encode(cv2.imencode(".jpg", np.full((480, 640, 3), 90, np.uint8))[1]).decode()
 
 
@@ -52,6 +49,7 @@ class Station(BaseHTTPRequestHandler):
             LOG["homes"].append((body, LEASE["id"]))
             return self.reply(200, {"lease": {"reached_home": True, "reason": "home_reached"}})
         if self.path == "/supervisor/cv/start":
+            time.sleep(CV_START_S)
             LEASE["id"] = uuid.uuid4().hex
             LOG["starts"] += 1
             return self.reply(200, {"lease_id": LEASE["id"], "status": "CV ready"})
@@ -88,7 +86,12 @@ async def operator(room: str) -> None:
     load_env()
     op = Operator(OperatorConfig.from_yaml_file(CONFIG_PATH, room))
     latest = {}
-    op.on_observation(lambda obs: latest.update(obs=obs, at=time.monotonic()))
+    seen = [0]
+
+    def on_obs(obs):
+        latest.update(obs=obs, at=time.monotonic())
+        seen[0] += 1
+    op.on_observation(on_obs)
     await op.connect(required_env("LIVEKIT_URL"), mint_token("hand-teleop", room))
     for _ in range(100):
         if "obs" in latest:
@@ -100,7 +103,10 @@ async def operator(room: str) -> None:
     if obs is None:
         return
     await op.set_active_operator(op.local_identity())
-    await asyncio.sleep(2.5)  # the bridge opens the lease
+    before = seen[0]
+    await asyncio.sleep(CV_START_S - 0.5)  # the lease is still opening
+    print(f"observations while the lease opened: {seen[0] - before} in {CV_START_S - 0.5:.1f} s (the old bridge sent none)")
+    await asyncio.sleep(1.5)
     print("lease opened:", LOG["starts"] == 1, "| heartbeats while idle:", LOG["heartbeats"])
     start = dict(obs.state)
     goal = dict(start)
@@ -120,11 +126,16 @@ async def operator(room: str) -> None:
     await op.set_active_operator(None)
     await asyncio.sleep(0.8)
     print("released: lease stopped", LOG["stops"] == 1, "| lease now", LEASE["id"])
+    await op.set_active_operator(op.local_identity())
+    await asyncio.sleep(1.0)
+    await op.set_active_operator(None)  # released while the lease is still opening
+    await asyncio.sleep(CV_START_S + 0.5)
+    print("released mid-open: opened", LOG["starts"] == 2, "and closed", LOG["stops"] == 2, "| lease now", LEASE["id"])
     print("home, unconfirmed:", await op.perform_rpc("home", payload="", destination="robot"))
     await op.set_active_operator(op.local_identity())
-    await asyncio.sleep(1.5)
+    await asyncio.sleep(1.5)  # asked while the lease is still opening
     print("home, confirmed, while in control:", await op.perform_rpc("home", payload="grippers_empty", destination="robot"))
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(CV_START_S + 1.0)
     print(f"homes {len(LOG['homes'])}: body {LOG['homes'][0][0] if LOG['homes'] else None}, "
           f"station lease during home {LOG['homes'][0][1] if LOG['homes'] else '-'}, control after: {op.active_operator()}")
     await op.disconnect()
