@@ -113,8 +113,10 @@ class Lease:
     def __init__(self) -> None:
         self.id: str | None = None
 
-    def open(self) -> None:
-        self.id = post("/supervisor/cv/start", timeout=120)["lease_id"]
+    @staticmethod
+    def open() -> str:
+        """Seconds the first time: the station readies its IK. The loop keeps publishing meanwhile."""
+        return post("/supervisor/cv/start", timeout=120)["lease_id"]
 
     def send(self, joints: dict, grippers: dict) -> None:
         post("/supervisor/cv/frame", {"lease_id": self.id, "targets": joints, "grippers": grippers})
@@ -141,6 +143,7 @@ async def main() -> None:
     last_problem = ""
     home_from: str | None = None  # who asked for a home the loop has not run yet
     homing: asyncio.Task | None = None  # the station's home, run off the loop so video keeps flowing
+    opening: asyncio.Task | None = None  # the station's cv/start, likewise
     latest_at = 0.0
 
     def on_action(action: Action) -> None:
@@ -155,6 +158,22 @@ async def main() -> None:
             print(f"[bridge] {await asyncio.to_thread(home)}")
         except Exception as exc:
             print(f"[bridge] home failed: {exc}")
+
+    def is_opening() -> bool:
+        return opening is not None and not opening.done()
+
+    async def open_lease(who: str) -> None:
+        """Holds the lease once it opens; the loop closes it if control moved on meanwhile."""
+        try:
+            lease.id = await asyncio.to_thread(Lease.open)  # its own thread: the station thread keeps reading
+        except Exception as exc:
+            if wanted == who:
+                await release(f"Manifest refused control: {exc}")
+            else:
+                print(f"[bridge] the lease {who} asked for did not open: {exc}")
+            return
+        print("[bridge] lease open: the operator drives the arms" if wanted == who else
+              "[bridge] lease open, but control moved on: closing it")
 
     def on_active_operator_changed(identity: str | None) -> None:
         nonlocal latest, wanted
@@ -199,7 +218,7 @@ async def main() -> None:
         await robot.connect(url, mint_token(ROBOT_IDENTITY, room))
         print(f"[bridge] connected; {cfg.fps} fps; c in an operator takes control through Manifest's lease")
         async for _ in pace(cfg.fps):
-            if home_from:
+            if home_from and not is_opening():  # a lease still opening is closed first, below
                 who, home_from = home_from, None
                 print(f"[bridge] {who} asked for home: releasing control ...")
                 latest, wanted = {}, None
@@ -215,13 +234,9 @@ async def main() -> None:
                 await release("the arms are homing: wait for it to finish")
                 continue
             if wanted and lease.id is None:
-                print(f"[bridge] {wanted} has control: opening Manifest's lease ...")
-                try:
-                    await station.run(lease.open)
-                    print("[bridge] lease open: the operator drives the arms")
-                except Exception as exc:
-                    await release(f"Manifest refused control: {exc}")
-                    continue
+                if not is_opening():
+                    print(f"[bridge] {wanted} has control: opening Manifest's lease ...")
+                    opening = asyncio.create_task(open_lease(wanted))
             elif not wanted and lease.id:
                 try:
                     await station.run(lease.close)
@@ -267,6 +282,8 @@ async def main() -> None:
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n[bridge] stopping ...")
     finally:
+        if is_opening():  # a lease that opens after this would be left for the station's watchdog
+            await asyncio.wait({opening}, timeout=15)
         try:
             await station.run(lease.close)  # the station holds the arms where they are
         except Exception as exc:
