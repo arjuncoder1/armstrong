@@ -17,7 +17,7 @@ from typing import Optional
 
 # `1`-`9` select the session's task; see src/utils/session.py for why nine.
 # `h` then `y` homes Manifest's arms from hand-teleop (manifest_bridge).
-KEYS = {"c", "p", "r", "[", "x", "h", "y"} | {str(digit) for digit in range(1, 10)}
+KEYS = {"c", "p", "r", "[", "x", "h", "y", "g"} | {str(digit) for digit in range(1, 10)}
 
 # One keystroke can reach both sources. The same key from the OTHER source
 # within this window is that echo, not a second press.

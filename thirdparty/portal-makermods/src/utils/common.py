@@ -30,6 +30,8 @@ PARK_RPC = "park"  # `p` in any operator: the robot parks the arms, or powers pa
 PARK_TOGGLE = ""  # PARK_RPC payload for `p`: park, or power up parked arms
 PARK_ONLY = "park"  # PARK_RPC payload that only parks: never powers up, and parked arms stay as they are
 HOME_RPC = "home"  # the robot walks the powered arms back to rest and holds them there: never parks or powers up
+# manifest_bridge: Dream-1 finishes a grasp on one arm (payload {"arm", "object"}; "status" asks how it went)
+GRAB_RPC = "grab"
 
 # The task-switching Dream-1 (`uv run dream-1-tasks`) answers these; the voice agent calls them.
 # Each takes and returns JSON; every reply is the status (see src/policies/dream_1_tasks/run.py).

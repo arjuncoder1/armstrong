@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import math
 import os
 import threading
@@ -31,9 +32,9 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from utils.common import (CONFIG_PATH, HOME_RPC, ROBOT_IDENTITY, HardwareThread, claim_or_release, env_camera_id,
-                          env_float, env_int, env_str, hand_teleop_identity, load_env, mint_token, pace, request_park,
-                          required_env)
+from utils.common import (CONFIG_PATH, GRAB_RPC, HOME_RPC, ROBOT_IDENTITY, HardwareThread, claim_or_release,
+                          env_camera_id, env_float, env_int, env_str, hand_teleop_identity, load_env, mint_token, pace,
+                          request_park, required_env)
 
 HOME_CONFIRM_S = 3.0  # `y` within this after `h` homes the arms; a home opens both grippers
 HOME_CONFIRMED = "grippers_empty"  # the home RPC payload saying both grippers are empty (manifest_bridge)
@@ -47,6 +48,30 @@ async def request_home(op) -> str:
         line = f"home request failed: {exc}; ask again to retry"
     print(f"[hands] {line}")
     return line
+
+
+async def request_grab(op, side: str, thing: str) -> str:
+    """Hand one arm to Dream-1 to finish a grasp (manifest_bridge); taking control again stops it."""
+    try:
+        return "robot: " + await op.perform_rpc(GRAB_RPC, payload=json.dumps({"arm": side, "object": thing}),
+                                                destination=ROBOT_IDENTITY)
+    except Exception as exc:
+        return f"grab request failed: {exc}"
+
+
+async def watch_grab(op, show) -> None:
+    """Reports the robot's grab progress until it ends."""
+    said = ""
+    for _ in range(120):
+        await asyncio.sleep(1)
+        try:
+            status = json.loads(await op.perform_rpc(GRAB_RPC, payload="status", destination=ROBOT_IDENTITY))
+        except Exception:
+            continue
+        show(status["line"], status["active"], status["line"] != said)
+        said = status["line"]
+        if not status["active"]:
+            return
 from utils.hands import (BONES, INDEX_TIP, THUMB_TIP, ArmFollower, ArmsIK, Clutch, Hand, HandPose, HandSize, Mapping,
                          assign_sides, camera_to_base, hand_pose, turn_between)
 from utils.hotkeys import Hotkeys, input_backend_warning
@@ -408,6 +433,25 @@ async def main() -> None:
         print(f"[hands] {line}")
         if dashboard:
             dashboard.log(line)
+
+    grab_line, grab_active, grab_side, grab_object, grab_watch = "", False, None, "", None
+
+    def show_grab(line: str, active: bool, changed: bool) -> None:
+        nonlocal grab_line, grab_active
+        grab_line, grab_active = line, active
+        if changed and (not active or "starting" in line):
+            say(line)
+
+    async def grab(side: str | None, thing: str) -> None:
+        nonlocal grab_watch
+        if side is None:
+            say("grab: steer an arm first (or use a Grab button) so it is clear which arm Dream-1 takes")
+            return
+        line = await request_grab(op, side, thing)
+        say(line)
+        if "takes the" in line and (grab_watch is None or grab_watch.done()):
+            show_grab(f"Dream-1 is starting a grab with the {side} arm", True, False)
+            grab_watch = asyncio.create_task(watch_grab(op, show_grab))
     try:
         print("[hands] compiling the IK (a few seconds the first time) ...")
         await worker.run(ik.warmup)
@@ -442,7 +486,8 @@ async def main() -> None:
         print("[hands] curl middle, ring and pinky into the palm to grip an arm; thumb to index sets its gripper; "
               "lift one out to let go" + ("" if args.rotate == "off" else "; turning the hand turns the gripper"))
         print("[hands] " + ("offline: nothing is sent; x quits" if args.offline else
-                            "c takes or releases control, h then y homes, p parks, x quits"))
+                            "c takes or releases control, g hands the arm you steered last to Dream-1 to grab, "
+                            "h then y homes, p parks, x quits"))
         shown_seq = 0
         home_asked = 0.0
         async for tick in pace(fps):
@@ -466,6 +511,13 @@ async def main() -> None:
                     home_asked = time.monotonic()
                     print(f"[hands] y within {HOME_CONFIRM_S:.0f} s homes both arms: it OPENS both "
                           "grippers, so neither may hold anything")
+                for command in clicked:  # "grab <arm> [object]" from the dashboard
+                    if command.startswith("grab "):
+                        _, side, *thing = command.split(" ", 2)
+                        grab_side, grab_object = side, (thing[0] if thing else "")
+                        await grab(side, grab_object)
+                if "g" in keys:
+                    await grab(grab_side, grab_object)
 
             now = time.monotonic()
             sighting = webcam.latest()
@@ -502,6 +554,8 @@ async def main() -> None:
                 op.send_action(action, in_reply_to_ts_us=obs.timestamp_us)
 
             following = [side for side, arm in pilot.arms.items() if arm.follower.engaged]
+            if len(following) == 1:
+                grab_side = following[0]  # `g` grabs with the arm steered last
             if sighting is not None and sighting.seq != shown_seq:
                 shown_seq = sighting.seq
                 status = ("offline" if op is None else "control: yes" if mine else
@@ -515,6 +569,7 @@ async def main() -> None:
                     "control": "you" if op is None or holder == op.local_identity() else holder or "nobody",
                     "fresh": op is None or (obs is not None and now - obs_at < OBS_STALE_S),
                     "following": following, "webcam_fps": webcam_fps, "ik_ms": pilot.ik_ms,
+                    "grab": grab_line, "grab_active": grab_active, "grab_side": grab_side,
                     "joints": None if not state else {side: [*(math.degrees(state[n]) for n in arm_fields(side)[:6]),
                                                              state[arm_fields(side)[6]]] for side in SIDES},
                 }

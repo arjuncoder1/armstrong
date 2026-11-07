@@ -9,6 +9,7 @@ import collections
 import hmac
 import json
 import queue
+import re
 import secrets
 import time
 
@@ -17,6 +18,7 @@ import numpy as np
 from aiohttp import WSMsgType, web
 
 COMMANDS = {"c", "release", "home"}  # take or release control, release only, home (confirmed on the page)
+GRAB = re.compile(r"grab (left|right)(?: [\w .,'/-]{1,80})?")  # hand an arm to Dream-1, optionally naming the object
 VIEW_FPS = {"tracking": 24}  # MJPEG rate per view; robot cameras default to 10
 
 PAGE = r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
@@ -42,6 +44,8 @@ th{color:var(--muted);font-weight:500}td:first-child,th:first-child{text-align:l
 .follow span{display:inline-flex;align-items:center;gap:6px;margin-right:14px}
 dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:16px;max-width:460px;padding:22px}
 dialog::backdrop{background:rgba(0,0,0,.55)}video{display:none}
+input{font:inherit;color:var(--text);background:#2a2a2a;border:1px solid #444;border-radius:10px;padding:8px 10px;width:100%}
+#grabLine.on{color:var(--warn)}
 </style></head><body><main>
 <header><h1>Hand Teleop</h1><span class="muted">MediaPipe + IK · room <b id="room">-</b></span>
 <span style="flex:1"></span><span id="link" class="pill bad"><span class="dot"></span><span>connecting</span></span></header>
@@ -60,6 +64,11 @@ dialog::backdrop{background:rgba(0,0,0,.55)}video{display:none}
   <div class="follow"><span id="fl"><span class="dot"></span>Left</span><span id="fr"><span class="dot"></span>Right</span>
   <span class="muted">following</span></div>
  </div>
+ <div class="panel"><div class="muted" style="margin-bottom:8px">Dream-1 grab</div>
+  <input id="object" maxlength="80" placeholder="what to grab, e.g. orange cube">
+  <div class="row"><button id="grabL">Grab with left</button><button id="grabR">Grab with right</button></div>
+  <div class="muted" id="grabLine">Steer a gripper up to the object, then Grab (or g): Dream-1 closes it and lifts.
+  Take control stops it.</div></div>
  <div class="panel"><table><thead><tr><th>Joint</th><th>Left</th><th>Right</th></tr></thead><tbody id="joints"></tbody></table></div>
  <div class="panel stats">
   <span class="muted">Webcam</span><b id="fps">-</b><span class="muted">IK solve</span><b id="ik">-</b>
@@ -83,6 +92,8 @@ function pill(el,cls,text){el.className='pill '+cls;el.lastElementChild.textCont
 $('#take').onclick=()=>command('c');$('#release').onclick=()=>command('release');
 $('#homeOpen').onclick=()=>$('#home').showModal();$('#homeCancel').onclick=()=>$('#home').close();
 $('#homeGo').onclick=()=>{$('#home').close();command('home');};
+function grab(side){const o=$('#object').value.trim().replace(/[^\w .,'\/-]/g,'').slice(0,80);command('grab '+side+(o?' '+o:''));}
+$('#grabL').onclick=()=>grab('left');$('#grabR').onclick=()=>grab('right');
 async function poll(){
  try{const r=await fetch('/state'+q);if(!r.ok)throw Error(r.status===403?'Use the full URL printed in the terminal':'HTTP '+r.status);
   const s=await r.json();render(s);}
@@ -103,6 +114,8 @@ function render(s){
   +`<tr><td>Gripper</td><td>${j.left[6].toFixed(0)} mm</td><td>${j.right[6].toFixed(0)} mm</td></tr>`:'<tr><td>No robot state yet</td></tr>';
  const l=$('#log'),text=s.log.join('\n');if(l.textContent!==text){l.textContent=text;l.scrollTop=l.scrollHeight;}
  if(s.camera!==camera){camera=s.camera;$('#camRow').hidden=!camera;}
+ if(s.grab){$('#grabLine').textContent=s.grab;$('#grabLine').className=s.grab_active?'on':'muted';}
+ $('#grabL').disabled=$('#grabR').disabled=!!s.grab_active;
 }
 // Browser camera (--browser): 640x480 JPEGs over a socket, one in flight.
 const video=$('video'),canvas=Object.assign(document.createElement('canvas'),{width:640,height:480});let socket,stream,running=false;
@@ -211,7 +224,7 @@ class Dashboard:
     async def _command(self, request):
         self._check(request)
         command = (await request.text()).strip()
-        if command not in COMMANDS:
+        if command not in COMMANDS and not GRAB.fullmatch(command):
             raise web.HTTPBadRequest(text=f"unknown command {command!r}")
         self._commands.add(command)
         return web.Response(text="ok")

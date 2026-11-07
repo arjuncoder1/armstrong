@@ -14,6 +14,10 @@ has control, Manifest's own tasks and teaching run as usual. Park stays Manifest
 (`h` then `y` in hand-teleop), with payload "grippers_empty" because it opens both grippers, from
 the operator in control or anyone while nobody is, releases control and runs Manifest's native home.
 An action older than ACTION_STALE_S is never replayed: if the operator goes quiet, the arms hold.
+
+The grab RPC (`g` or Grab in hand-teleop) is shared autonomy: the operator steers a gripper next to an
+object, then Dream-1 finishes the grasp through Manifest's action, scoped to that arm (the other arm
+and its gripper hold), for at most GRAB_SECONDS. Taking control stops it at once.
 """
 from __future__ import annotations
 
@@ -21,6 +25,7 @@ import asyncio
 import base64
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -29,8 +34,8 @@ import cv2
 import numpy as np
 from livekit.portal import Action, Robot, RobotConfig
 
-from utils.common import (CONFIG_PATH, HOME_RPC, PARK_RPC, ROBOT_IDENTITY, HardwareThread, env_float, load_env,
-                          mint_token, pace, required_env)
+from utils.common import (CONFIG_PATH, GRAB_RPC, HOME_RPC, PARK_RPC, ROBOT_IDENTITY, HardwareThread, env_float,
+                          load_env, mint_token, pace, required_env)
 from utils.metal import StepLimiter, arm_fields, clamp_to_limits, gripper_max_mm
 
 STATION = os.environ.get("MANIFEST_STATION_URL", "http://127.0.0.1:8091")
@@ -45,6 +50,7 @@ IMAGE_EVERY_S = 0.2  # the station encodes its camera JPEGs at 5 fps
 TRACKS = {"top": "overhead_camera", "left": "left_wrist_camera", "right": "right_wrist_camera"}
 WIDTH = 640
 HOME_CONFIRMED = "grippers_empty"  # the home RPC payload: Manifest's native home opens both grippers
+GRAB_SECONDS = env_float("GRAB_SECONDS", 10.0)  # Dream-1's running time for a grab; Manifest allows 0.5-12
 
 
 def post(route: str, body: dict | None = None, timeout: float = 3.0) -> dict:
@@ -107,6 +113,42 @@ def home() -> str:
     return f"home not reached ({lease.get('reason')}; joint error {lease.get('max_joint_error_rad')})"
 
 
+def grab_prompt(side: str, thing: str) -> str:
+    thing = thing or f"object between the {side} gripper's fingers"
+    return (f"Grasp the {thing} with the {side} gripper: open the {side} gripper, move it around the {thing}, "
+            f"close the {side} gripper on it, then lift it slightly.")
+
+
+class Grab:
+    """One Dream-1 grab: Manifest's action scoped to one arm, kept alive until it ends or `stop` is set."""
+
+    def __init__(self, side: str, thing: str) -> None:
+        self.side, self.thing = side, thing
+        self.stop = threading.Event()
+        self.line = f"Dream-1 is starting a grab with the {side} arm"
+
+    def run(self) -> str:
+        seen = post("/supervisor/observe")
+        lease = post("/supervisor/action", {"observation_id": seen["observation_id"], "arm": self.side,
+                                            "gripper_mode": "active", "seconds": GRAB_SECONDS,
+                                            "instruction": grab_prompt(self.side, self.thing)}, timeout=30)["lease"]
+        ident, started = lease["id"], time.monotonic()
+        try:
+            while lease.get("active"):
+                if self.stop.wait(0.5):
+                    post("/supervisor/stop", {"lease_id": ident})
+                    return f"Dream-1's {self.side} grab stopped: an operator took control"
+                lease = post("/supervisor/heartbeat", {"lease_id": ident})["lease"]
+                self.line = f"Dream-1 grabbing with the {self.side} arm: {time.monotonic() - started:.0f} s"
+            return f"Dream-1's {self.side} grab ended ({lease.get('reason')}); c takes control"
+        except BaseException:
+            try:
+                post("/supervisor/stop", {"lease_id": ident})  # never leave Dream-1 running
+            except Exception:
+                pass
+            raise
+
+
 class Lease:
     """The station's CV lease, held while an operator has control."""
 
@@ -144,6 +186,10 @@ async def main() -> None:
     home_from: str | None = None  # who asked for a home the loop has not run yet
     homing: asyncio.Task | None = None  # the station's home, run off the loop so video keeps flowing
     opening: asyncio.Task | None = None  # the station's cv/start, likewise
+    grab_from: tuple[str, str, str] | None = None  # (caller, arm, object) of a grab the loop has not started
+    grab: Grab | None = None  # the latest grab
+    grabbing: asyncio.Task | None = None
+    grab_line = "no grab yet"
     latest_at = 0.0
 
     def on_action(action: Action) -> None:
@@ -161,6 +207,37 @@ async def main() -> None:
 
     def is_opening() -> bool:
         return opening is not None and not opening.done()
+
+    def is_grabbing() -> bool:
+        return grabbing is not None and not grabbing.done()
+
+    async def run_grab(job: Grab) -> None:
+        nonlocal grab_line
+        try:
+            grab_line = await asyncio.to_thread(job.run)
+        except Exception as exc:
+            grab_line = f"Dream-1's {job.side} grab failed: {exc}"
+        print(f"[bridge] {grab_line}")
+
+    def on_grab(data) -> str:
+        nonlocal grab_from
+        if data.payload == "status":
+            busy = bool(grab_from) or is_grabbing()
+            return json.dumps({"active": busy, "line": grab.line if busy and grab else grab_line})
+        try:
+            ask = json.loads(data.payload)
+            side, thing = ask["arm"], str(ask.get("object", "")).strip()[:80]
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return 'grab payload: {"arm": "left" or "right", "object": "..."}'
+        if side not in SIDES:
+            return f"grab: unknown arm {side!r}"
+        holder = robot.active_operator()
+        if holder not in (None, data.caller_identity):
+            return f"{holder} has control: only they can hand an arm to Dream-1"
+        if is_grabbing() or grab_from or is_homing() or home_from:
+            return "busy: a grab or home is already running"
+        grab_from = (data.caller_identity, side, thing)
+        return f"Dream-1 takes the {side} arm to grab {thing or 'what is between its fingers'}: c takes it back"
 
     async def open_lease(who: str) -> None:
         """Holds the lease once it opens; the loop closes it if control moved on meanwhile."""
@@ -204,11 +281,14 @@ async def main() -> None:
             return f"{holder} has control: only they can home the arms"
         if is_homing() or home_from:
             return "already homing"
+        if is_grabbing() or grab_from:
+            return "Dream-1 is grabbing: take control (c) to stop it, then home"
         home_from = data.caller_identity
         return "homing both arms through Manifest: control released, grippers opening"
 
     robot.register_rpc_method(PARK_RPC, lambda data: "Manifest powers these arms: park from its GUI")
     robot.register_rpc_method(HOME_RPC, on_home)
+    robot.register_rpc_method(GRAB_RPC, on_grab)
     robot.on_action(on_action)
     robot.on_active_operator_changed(on_active_operator_changed)
     robot.on_operator_left(on_operator_left)
@@ -230,10 +310,28 @@ async def main() -> None:
                     print(f"[bridge] closing the lease: {exc}")
                 homing = asyncio.create_task(run_home())
                 continue
+            if grab_from and not is_opening():  # likewise: the operator's lease closes first
+                who, side, thing = grab_from
+                grab_from = None
+                print(f"[bridge] {who} handed the {side} arm to Dream-1 to grab {thing or 'what is between its fingers'}")
+                latest, wanted = {}, None
+                await robot.set_active_operator(None)
+                try:
+                    await station.run(lease.close)
+                except Exception as exc:
+                    lease.id = None
+                    print(f"[bridge] closing the lease: {exc}")
+                grab = Grab(side, thing)
+                grabbing = asyncio.create_task(run_grab(grab))
+                continue
             if wanted and lease.id is None and is_homing():
                 await release("the arms are homing: wait for it to finish")
                 continue
-            if wanted and lease.id is None:
+            if wanted and is_grabbing():  # taking control is the override: Dream-1 stops, then the lease opens
+                if not grab.stop.is_set():
+                    print(f"[bridge] {wanted} took control: stopping Dream-1's grab")
+                    grab.stop.set()
+            elif wanted and lease.id is None:
                 if not is_opening():
                     print(f"[bridge] {wanted} has control: opening Manifest's lease ...")
                     opening = asyncio.create_task(open_lease(wanted))
@@ -284,6 +382,9 @@ async def main() -> None:
     finally:
         if is_opening():  # a lease that opens after this would be left for the station's watchdog
             await asyncio.wait({opening}, timeout=15)
+        if is_grabbing():  # Dream-1 stops with the bridge (its watchdog would stop it 3 s later anyway)
+            grab.stop.set()
+            await asyncio.wait({grabbing}, timeout=10)
         try:
             await station.run(lease.close)  # the station holds the arms where they are
         except Exception as exc:
