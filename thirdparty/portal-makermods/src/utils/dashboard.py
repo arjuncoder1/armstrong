@@ -271,7 +271,7 @@ class Dashboard:
         app.router.add_post("/command", self._command)
         app.router.add_get("/view/{name}", self._view)
         app.router.add_get("/camera", self._camera)
-        self._runner = web.AppRunner(app, shutdown_timeout=1)
+        self._runner = web.AppRunner(app, shutdown_timeout=1, access_log=None)  # the page polls 5x/s, with the token
         await self._runner.setup()
         await web.TCPSite(self._runner, host, port).start()
         # scripts/cv-teleop.sh finds the browser-camera URL by "laptop camera:".
