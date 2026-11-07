@@ -39,12 +39,14 @@ HOME_CONFIRM_S = 3.0  # `y` within this after `h` homes the arms; a home opens b
 HOME_CONFIRMED = "grippers_empty"  # the home RPC payload saying both grippers are empty (manifest_bridge)
 
 
-async def request_home(op) -> None:
+async def request_home(op) -> str:
     """Ask the robot to walk both arms home; through Manifest (manifest_bridge) that opens both grippers."""
     try:
-        print(f"[hands] robot: {await op.perform_rpc(HOME_RPC, payload=HOME_CONFIRMED, destination=ROBOT_IDENTITY)}")
+        line = f"robot: {await op.perform_rpc(HOME_RPC, payload=HOME_CONFIRMED, destination=ROBOT_IDENTITY)}"
     except Exception as exc:
-        print(f"[hands] home request failed: {exc}; press h then y to retry")
+        line = f"home request failed: {exc}; ask again to retry"
+    print(f"[hands] {line}")
+    return line
 from utils.hands import (BONES, INDEX_TIP, THUMB_TIP, ArmFollower, ArmsIK, Clutch, Hand, HandPose, HandSize, Mapping,
                          assign_sides, camera_to_base, hand_pose, turn_between)
 from utils.hotkeys import Hotkeys, input_backend_warning
@@ -366,14 +368,17 @@ async def main() -> None:
     parser.add_argument("--rotate", choices=("full", "yaw", "off"), default=env_str("HAND_ROTATE", "full"),
                         help="what the hand's turning does to the gripper (default: full, it turns as the hand "
                              "does; yaw: about vertical only; off: it keeps its orientation)")
-    parser.add_argument("--browser", action="store_true", help="use the viewing laptop's browser camera")
+    parser.add_argument("--dashboard", action="store_true",
+                        help="a live web dashboard (tracking, robot cameras, joints, control, home) instead of Rerun")
+    parser.add_argument("--browser", action="store_true",
+                        help="the dashboard, with the viewing laptop's browser camera instead of a local webcam")
     parser.add_argument("--browser-host", default="127.0.0.1")
     parser.add_argument("--browser-port", type=int, default=8081)
     args = parser.parse_args()
-    browser = None
-    if args.browser:
-        from utils.browser_hands import BrowserHands
-        browser = BrowserHands()
+    dashboard = None
+    if args.dashboard or args.browser:
+        from utils.dashboard import Dashboard
+        dashboard = Dashboard(browser_camera=args.browser)
 
     if args.offline:
         cfg, url, room, fps, cameras = None, "", "offline", env_int("PORTAL_FPS", 30), []
@@ -384,12 +389,12 @@ async def main() -> None:
         cfg = OperatorConfig.from_yaml_file(CONFIG_PATH, room)
         fps, cameras = env_int("PORTAL_FPS", cfg.fps), list(cfg.video_tracks)
 
-    width, height = (640, 480) if browser else (env_int("HAND_CAMERA_WIDTH", 640), env_int("HAND_CAMERA_HEIGHT", 480))
+    width, height = (640, 480) if args.browser else (env_int("HAND_CAMERA_WIDTH", 640), env_int("HAND_CAMERA_HEIGHT", 480))
     worker = HardwareThread("hand-ik")  # the IK off the event loop
     ik = ArmsIK(fps, env_float("HAND_TABLE_Z_M", 0.0), env_float("HAND_MAX_JOINT_RAD_S", 1.5))
     pilot = build_pilot(fps, ik, args.rotate, width)
-    webcam = Webcam(0 if browser else env_camera_id("HAND_CAMERA", "0"), width, height,
-                    capture=browser.capture if browser else None)
+    webcam = Webcam(0 if args.browser else env_camera_id("HAND_CAMERA", "0"), width, height,
+                    capture=dashboard.capture if args.browser else None)
     hotkeys = Hotkeys(global_tap=env_int("PORTAL_HOTKEYS_GLOBAL", 1) != 0)
     rest = {name: value for side in SIDES  # offline: both arms at the IK's rest, grippers half open
             for name, value in zip(arm_fields(side), [*ik.rest, 50.0])}
@@ -397,12 +402,18 @@ async def main() -> None:
     op, preview = None, None
     latest_obs, obs_at, shown_ts = None, 0.0, None
     control_changed = False
+    robot_view_at, webcam_fps = 0.0, None
+
+    def say(line: str) -> None:
+        print(f"[hands] {line}")
+        if dashboard:
+            dashboard.log(line)
     try:
         print("[hands] compiling the IK (a few seconds the first time) ...")
         await worker.run(ik.warmup)
         webcam.start()
-        if browser:
-            await browser.start(args.browser_host, args.browser_port)
+        if dashboard:
+            await dashboard.start(args.browser_host, args.browser_port)
         else:
             preview = Preview(room, cameras + [WEBCAM_VIEW], port=HAND_TELEOP_VIEWER_PORT)
         if not args.offline:
@@ -417,7 +428,7 @@ async def main() -> None:
             def on_active_operator_changed(identity) -> None:
                 nonlocal control_changed
                 control_changed = True
-                print(f"[hands] active operator: {identity}")
+                say(f"active operator: {identity}")
 
             op.on_observation(on_observation)
             op.on_active_operator_changed(on_active_operator_changed)
@@ -436,18 +447,21 @@ async def main() -> None:
         home_asked = 0.0
         async for tick in pace(fps):
             keys = set(hotkeys.drain())
-            if browser:
-                keys.update(browser.drain())
+            clicked = dashboard.drain() if dashboard else set()
             if "x" in keys:
                 break
             if op is not None:
-                if "c" in keys:
+                if "c" in keys or "c" in clicked:
+                    await claim_or_release(op, "hands")
+                if "release" in clicked and op.active_operator() == op.local_identity():
                     await claim_or_release(op, "hands")
                 if "p" in keys:
                     await request_park(op, "hands")
-                if "y" in keys and time.monotonic() - home_asked < HOME_CONFIRM_S:
+                if "home" in clicked:  # confirmed in the page's dialog
+                    say(await request_home(op))
+                elif "y" in keys and time.monotonic() - home_asked < HOME_CONFIRM_S:
                     home_asked = 0.0
-                    await request_home(op)
+                    say(await request_home(op))
                 elif "h" in keys:  # a held h only re-arms the question; y is the confirmation
                     home_asked = time.monotonic()
                     print(f"[hands] y within {HOME_CONFIRM_S:.0f} s homes both arms: it OPENS both "
@@ -468,42 +482,54 @@ async def main() -> None:
                 mine = op.active_operator() == op.local_identity()
                 state = obs.state if fresh else None
                 mine = mine and fresh
-                if preview is not None and obs is not None and obs.timestamp_us != shown_ts:
+                if obs is not None and obs.timestamp_us != shown_ts:
                     shown_ts = obs.timestamp_us
-                    for name, frame in obs.frames.items():
-                        preview.show(name, frame_bytes_to_numpy_rgb(frame.data, frame.width, frame.height))
+                    if preview is not None:
+                        for name, frame in obs.frames.items():
+                            preview.show(name, frame_bytes_to_numpy_rgb(frame.data, frame.width, frame.height))
+                    elif now - robot_view_at > 0.1:  # the dashboard shows the robot's cameras at 10 fps
+                        robot_view_at = now
+                        for name, frame in obs.frames.items():
+                            dashboard.show(name, frame_bytes_to_numpy_rgb(frame.data, frame.width, frame.height))
 
-            if browser and not browser.fresh:
+            if args.browser and not dashboard.fresh:
                 mine = False
                 pilot.drop()
             action = await worker.run(pilot.tick, mine, state)
             for line in pilot.drain_events():
-                print(f"[hands] {line}")
+                say(line)
             if action is not None and op is not None:
                 op.send_action(action, in_reply_to_ts_us=obs.timestamp_us)
 
+            following = [side for side, arm in pilot.arms.items() if arm.follower.engaged]
             if sighting is not None and sighting.seq != shown_seq:
                 shown_seq = sighting.seq
                 status = ("offline" if op is None else "control: yes" if mine else
-                          "control: no (c takes it, h twice homes)" if op.active_operator() != op.local_identity() else
-                          "control: yes, no fresh robot view")
-                if browser:
-                    following = [side for side, arm in pilot.arms.items() if arm.follower.engaged]
-                    browser.status = status + "; following: " + (", ".join(following) or "none")
-                else:
-                    preview.show(WEBCAM_VIEW, draw(sighting, pilot, status))
+                          "control: no (c takes it, h then y homes)" if op.active_operator() != op.local_identity()
+                          else "control: yes, no fresh robot view")
+                (dashboard or preview).show(WEBCAM_VIEW if preview else "tracking", draw(sighting, pilot, status))
+            if dashboard:
+                holder = None if op is None else op.active_operator()
+                dashboard.status = {
+                    "room": room, "connected": op is not None, "identity": "offline" if op is None else op.local_identity(),
+                    "control": "you" if op is None or holder == op.local_identity() else holder or "nobody",
+                    "fresh": op is None or (obs is not None and now - obs_at < OBS_STALE_S),
+                    "following": following, "webcam_fps": webcam_fps, "ik_ms": pilot.ik_ms,
+                    "joints": None if not state else {side: [*(math.degrees(state[n]) for n in arm_fields(side)[:6]),
+                                                             state[arm_fields(side)[6]]] for side in SIDES},
+                }
 
             if tick and tick % (fps * 5) == 0:
-                held = [side for side, arm in pilot.arms.items() if arm.follower.engaged] or ["none"]
-                print(f"[hands] webcam {webcam.frames / 5:.0f} fps, IK {pilot.ik_ms:.1f} ms, following: "
-                      + ", ".join(held))
+                webcam_fps = webcam.frames / 5
+                print(f"[hands] webcam {webcam_fps:.0f} fps, IK {pilot.ik_ms:.1f} ms, following: "
+                      + ", ".join(following or ["none"]))
                 webcam.frames = 0
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n[hands] stopping")
     finally:
         hotkeys.stop()
-        if browser:
-            await browser.stop()
+        if dashboard:
+            await dashboard.stop()
         webcam.stop()
         if preview is not None:
             preview.close()

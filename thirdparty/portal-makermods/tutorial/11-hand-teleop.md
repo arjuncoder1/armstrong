@@ -118,6 +118,21 @@ turned by up to half the field of view.
 The operator's actions are ordinary Portal actions: the recorder archives them during a take, but
 takes are still marked from the leader-arm teleop (`r`).
 
+## Live dashboard
+
+`--dashboard` swaps the Rerun window for a web page on port 8081 (`--browser-port` changes it):
+
+```bash
+uv run --group hands hand-teleop --dashboard
+```
+
+Open the printed `http://localhost:8081/#...` URL. The page shows the tracking view with each hand's
+skeleton, the robot's three cameras, both arms' joints and grippers, who has control, which arms are
+following, the webcam and IK rates, and the event log. **Take control** and **Release & hold** drive the
+control gate; **Home arms** asks the robot to home after a dialog (through Manifest's bridge it opens
+both grippers). The terminal keys still work. `--browser` below is the same page with the camera taken
+from the browser.
+
 ## Laptop camera through a browser
 
 Run this on the robot host to use the camera on the laptop viewing the page:
@@ -136,10 +151,9 @@ ssh -N -L 8081:127.0.0.1:8081 USER@10.103.1.11
 ```
 
 Open the printed `http://localhost:8081/#...` URL on the laptop. Click **Start laptop camera**
-and allow camera access, then **Take / release arm control**. The page reports control and which
-arms are following. Curl middle, ring and pinky to engage; move/turn your hand and pinch to grip.
-**Stop camera & hold** stops transmission; **Park / power up** uses the existing robot park toggle.
-Offline mode never sends robot commands, including those buttons.
+and allow camera access, then **Take control**. Curl middle, ring and pinky to engage; move/turn your
+hand and pinch to grip. **Stop camera** stops transmission and the arms hold. Offline mode never sends
+robot commands, including those buttons.
 
 The browser sends 640×480 JPEG frames; MediaPipe and IK run on the robot host. One camera client is
 accepted per process. No frames are recorded by this transport. Hidden tabs, closed connections,
