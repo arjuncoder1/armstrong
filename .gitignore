@@ -102,3 +102,9 @@ coverage.xml
 # Jupyter
 .ipynb_checkpoints/
 
+
+# Our Manifest plugins are tracked; anything else under tools/manifest stays local (never Manifest source).
+!tools/manifest/
+tools/manifest/*
+!tools/manifest/plugins/
+tools/manifest/plugins/**/__pycache__/
