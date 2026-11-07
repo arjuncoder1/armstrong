@@ -23,7 +23,7 @@ PAGE = r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport
 <title>Hand Teleop</title>
 <style>
 :root{--bg:#141414;--panel:#1f1f1f;--line:#333;--text:#ececec;--muted:#9a9a9a;--ok:#4cd964;--warn:#ffb340;--bad:#ff5f57}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,sans-serif}
+*{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,sans-serif}
 main{max-width:1320px;margin:0 auto;padding:20px;display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:16px}
 header{grid-column:1/-1;display:flex;align-items:center;gap:12px}h1{font-size:22px;margin:0;font-weight:650}
 .muted{color:var(--muted)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px}
@@ -75,6 +75,7 @@ path is clear. Whoever has control loses it.</p>
 <script>
 const token=location.hash.slice(1), q='?t='+encodeURIComponent(token), $=s=>document.querySelector(s);
 const JOINTS=['Pan','Lift','Elbow','Wrist flex','Wrist yaw','Wrist roll'];
+const deg=d=>(((d+180)%360+360)%360-180).toFixed(1)+'°';  // a motor can read a whole turn off until the station corrects it
 let views=[], camera=false;
 async function command(c){const r=await fetch('/command'+q,{method:'POST',body:c});if(!r.ok)note(await r.text());}
 function note(t){const l=$('#log');l.textContent+=t+'\n';l.scrollTop=l.scrollHeight;}
@@ -98,7 +99,7 @@ function render(s){
  for(const [id,side] of [['#fl','left'],['#fr','right']])$(id).className=s.following.includes(side)?'ok':'';
  $('#fps').textContent=s.webcam_fps==null?'-':s.webcam_fps.toFixed(0)+' fps';$('#ik').textContent=s.ik_ms.toFixed(1)+' ms';
  $('#fresh').textContent=s.fresh?'fresh':'stale';$('#who').textContent=s.identity;
- const j=s.joints;$('#joints').innerHTML=j?JOINTS.map((n,i)=>`<tr><td>${n}</td><td>${j.left[i].toFixed(1)}°</td><td>${j.right[i].toFixed(1)}°</td></tr>`).join('')
+ const j=s.joints;$('#joints').innerHTML=j?JOINTS.map((n,i)=>`<tr><td>${n}</td><td>${deg(j.left[i])}</td><td>${deg(j.right[i])}</td></tr>`).join('')
   +`<tr><td>Gripper</td><td>${j.left[6].toFixed(0)} mm</td><td>${j.right[6].toFixed(0)} mm</td></tr>`:'<tr><td>No robot state yet</td></tr>';
  const l=$('#log'),text=s.log.join('\n');if(l.textContent!==text){l.textContent=text;l.scrollTop=l.scrollHeight;}
  if(s.camera!==camera){camera=s.camera;$('#camRow').hidden=!camera;}

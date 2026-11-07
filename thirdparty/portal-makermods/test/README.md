@@ -8,6 +8,7 @@ uv run python -m test.test_teleop
 uv run python -m test.test_resilience
 uv run python -m unittest test.test_dream1 test.test_dream1_tasks test.test_task_monitor
 uv run python -m unittest test.test_hands
+uv run python -m unittest test.test_dashboard
 ```
 
 For transport and archive checks, start `livekit-server --dev` in another
