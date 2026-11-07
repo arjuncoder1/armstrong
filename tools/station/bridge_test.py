@@ -186,16 +186,21 @@ async def operator(room: str) -> None:
           "| no renewal after the stop:", len(LOG["actions"]) == n)
     ACTION_S[0] = 12.0
     print("grab right while in control:", await grab("right", "pick up the blue cube with the right arm"))
-    await asyncio.sleep(2.0)
-    TEMPS["right"][2] = 56.0  # a right motor reaches Manifest's warning mid-task
+    await asyncio.sleep(1.5)
+    TEMPS["right"][2] = 57.0  # past Manifest's 55 C warning mid-task, under the bridge's 60 C stop
+    await asyncio.sleep(1.0)
+    print(f"elbow 57 C mid-task: still running {LOG['action_stops'] == 1 and json.loads(await status())['active']}")
+    TEMPS["right"][2] = 61.0
     await asyncio.sleep(1.0)
     st = json.loads(await status())
-    print(f"heat: Dream-1 stopped {LOG['action_stops'] == 2}, active {st['active']}, line {st['line']!r}, "
+    print(f"elbow 61 C: Dream-1 stopped {LOG['action_stops'] == 2}, active {st['active']}, line {st['line']!r}, "
           f"instruction {LOG['actions'][n]['instruction']!r}")
     n = len(LOG["actions"])
-    print("grab while hot:", await grab("right", "pick up the blue cube"))
+    TEMPS["right"][2] = 56.0  # cooling, still at Manifest's warning
+    await asyncio.sleep(0.3)  # the bridge reads it
+    print("grab at 56 C:", await grab("right", "pick up the blue cube"))
     await asyncio.sleep(1.0)
-    print(f"  no action started {len(LOG['actions']) == n}, control kept: {op.active_operator()}")
+    print(f"  no action started {len(LOG['actions']) == n}")
     TEMPS["right"][2] = 40.0
     END[0], ACTION_S[0] = "action_complete", 1.5  # Dream-1 ends the task itself: no renewal
     print("grab, no task typed:", await grab("left"))
