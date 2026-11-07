@@ -1,0 +1,269 @@
+"""Robot safety: what the arms do when things go wrong. No hardware, no server.
+
+    uv run python -m test.test_resilience
+"""
+from __future__ import annotations
+
+import math
+import os
+import sys
+from types import SimpleNamespace
+
+import numpy as np
+
+from utils.metal import GRIPPER_MAX_MM, LIMITS_RAD, Arm, Followers, Leaders, StepLimiter, arm_fields, clamp_to_limits
+from test._harness import Checks
+
+HOME = [0.0, -1.2, 1.5, 0.0, 0.0, 0.0, 40.0]  # inside every soft limit; gripper 40 mm
+
+
+class FakeArm:
+    """Stands in for a `robots.followers.FollowerArm` at the calls `Arm` makes.
+
+    `read()` raises like the driver does on a silent or faulted motor; `write()` records the mm target it was handed.
+    """
+
+    def __init__(self):
+        self.raises, self.commands = False, []
+
+    def read(self):
+        if self.raises:
+            raise OSError("CAN read failed")
+        return SimpleNamespace(positions_rad=np.array(HOME[:6], dtype=np.float64), gripper=HOME[6] / GRIPPER_MAX_MM)
+
+    def write(self, command):
+        self.commands.append([*command.positions_rad, command.gripper * GRIPPER_MAX_MM])
+
+    def close(self):
+        pass
+
+
+class TrackingArm(FakeArm):
+    """Follows each command exactly, or not at all when `blocked`; records a switch-off."""
+
+    def __init__(self, start, blocked=False):
+        super().__init__()
+        self.pose, self.blocked, self.off = list(start), blocked, False
+
+    def read(self):
+        if self.raises:
+            raise OSError("CAN read failed")
+        return SimpleNamespace(positions_rad=np.array(self.pose[:6]), gripper=self.pose[6] / GRIPPER_MAX_MM)
+
+    def write(self, command):
+        super().write(command)
+        if not self.blocked:
+            self.pose = self.commands[-1]
+
+    def torque_off(self):
+        self.off = True
+
+
+def fake_connect(a, driver, fails=False):
+    """Stand in for `Arm.connect`: reattach `driver` (or raise), and log each open's energize flag."""
+    a.opened = []
+
+    def connect(energize=None):
+        if fails:
+            raise OSError("CAN adapter did not open")
+        a.opened.append(energize)
+        a._arm, a.energized = driver, energize
+    a.connect = connect
+
+
+def parking(blocked=False):
+    arms = {}
+    for side in ("left", "right"):
+        arms[side] = Arm(side, "can0", leader=False)
+        arms[side]._arm = TrackingArm([0.5, -1.0, 1.0, 0.2, 0.0, 0.0, 30.0], blocked and side == "left")
+        arms[side].energized = True
+        arms[side].rest = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        fake_connect(arms[side], arms[side]._arm)
+    return Followers(arms, {}, StepLimiter(0.1))
+
+
+def raises(fn, *args):
+    try:
+        fn(*args)
+    except Exception:
+        return True
+    return False
+
+
+class FakeCamera:
+    def read(self):
+        return "frame"
+
+
+def arm(side):
+    a = Arm(side, "can0", leader=False)
+    a._arm = FakeArm()
+    return a
+
+
+def pair(step=0.1):
+    return Followers({s: arm(s) for s in ("left", "right")}, {"overhead_camera": FakeCamera()}, StepLimiter(step))
+
+
+def action(left, right):
+    return dict(zip(arm_fields("left"), left)) | dict(zip(arm_fields("right"), right))
+
+
+def main() -> int:
+    c = Checks("robot safety")
+
+    a = arm("left")
+    a._arm.raises = True
+    c.check(a.read() is None and a.errors == 1, "a failed read returns None instead of raising")
+    c.check(a.read() is None and a.errors == 2, "every failed read counts; a motor fault never ends the loop")
+
+    p = pair()
+    state, frames = p.get_observation()
+    c.check(len(state) == 14 and frames == {"overhead_camera": "frame"}, "both arms read: fourteen values and video")
+    p.arms["right"]._arm.raises = True
+    state, frames = p.get_observation()
+    c.check(state == {} and frames, "one arm unreadable: no state at all, but video keeps flowing")
+
+    p = pair()
+    p.send_action(action(HOME, HOME))
+    c.check(not p.arms["left"]._arm.commands, "no command before the first observation")
+
+    p = pair(step=0.1)
+    p.get_observation()
+    far = [1.0] + HOME[1:6] + [0.0]  # joint1 a radian away, gripper closed
+    p.send_action(action(far, HOME))
+    sent = p.arms["left"]._arm.commands[-1]
+    c.check(math.isclose(sent[0], 0.1), "a far target advances by max_step", str(sent[0]))
+    c.check(sent[6] == 0.0, "the gripper is not ramped", str(sent[6]))
+    p.send_action(action(far, HOME))
+    c.check(math.isclose(p.arms["left"]._arm.commands[-1][0], 0.2), "the ramp continues from the last target")
+
+    limiter = StepLimiter(0.3)
+    limiter.present = {"left_joint1.pos": 0.0}
+    for _ in range(10):
+        out = limiter.step({"left_joint1.pos": 3.0})
+    c.check(math.isclose(out["left_joint1.pos"], StepLimiter.MAX_LAG), "a stuck joint's target leads by MAX_LAG at most")
+    limiter = StepLimiter(0.0)
+    limiter.present = {"left_joint1.pos": 0.0}
+    c.check(limiter.step({"left_joint1.pos": 2.0}) == {"left_joint1.pos": 2.0}, "max_step 0 disables the ramp")
+
+    clamped = clamp_to_limits(action([9, 9, -9, 9, 9, 9, 500], [-9] * 6 + [-5]))
+    joints_ok = all(lo <= clamped[f"{s}_joint{i + 1}.pos"] <= hi
+                    for s in ("left", "right") for i, (lo, hi) in enumerate(LIMITS_RAD))
+    c.check(joints_ok, "every joint lands inside its soft limit")
+    c.check(clamped["left_gripper.pos"] == GRIPPER_MAX_MM and clamped["right_gripper.pos"] == 0.0,
+            "grippers stay in 0-100 mm")
+
+    leaders = Leaders({s: arm(s) for s in ("left", "right")})
+    c.check(len(leaders.get_action()) == 14, "both leaders read: one fourteen-value action")
+    leaders.arms["left"]._arm.raises = True
+    c.check(leaders.get_action() == {}, "one leader unreadable: no action, never half of one")
+
+    os.environ["METAL_PARK_DEG_S"] = "3000"  # fast, so the test takes a second
+    p = parking()
+    p.park(fps=100)
+    poses = [a._arm.pose[:6] for a in p.arms.values()]
+    c.check(all(max(map(abs, pose)) < 1e-6 for pose in poses), "park walks both arms to their rest pose")
+    c.check(all(a._arm.off for a in p.arms.values()), "park switches the arms off once they are at rest")
+    c.check(p.parked and all(a.opened == [False] for a in p.arms.values()),
+            "a parked robot reopens the arms read-only: state keeps flowing, motors stay off")
+    before = len(p.arms["left"]._arm.commands)
+    p.limiter.present.update(action([0.0] * 7, [0.0] * 7))
+    p.send_action(action([0.3] * 7, [0.3] * 7))
+    c.check(len(p.arms["left"]._arm.commands) == before, "actions are ignored while parked")
+    p.unpark()
+    c.check(not p.parked and all(a.opened == [False, True] for a in p.arms.values()),
+            "unpark reopens the arms energized")
+    steps = [abs(b[1] - a[1]) for a, b in zip(p.arms["right"]._arm.commands, p.arms["right"]._arm.commands[1:])]
+    c.check(max(steps) <= math.radians(30) + 1e-9, "park never jumps more than one step per tick", f"{max(steps):.3f}")
+    p = parking()
+    p.park(fps=100)
+    before = len(p.arms["left"]._arm.commands)
+    p.park(fps=100)  # a second ctrl-c queues another park behind the first
+    c.check(len(p.arms["left"]._arm.commands) == before, "parking a parked robot does nothing")
+
+    p = parking(blocked=True)
+    c.check(raises(p.park, 100) and not any(a._arm.off for a in p.arms.values()),
+            "a blocked arm stops the park: nothing is switched off")
+
+    p = parking()
+    p.limiter.present.update(action([0.5] * 7, [0.5] * 7))
+    p.go_home(fps=100)
+    poses = [a._arm.pose for a in p.arms.values()]
+    c.check(all(max(map(abs, pose[:6])) < 1e-6 for pose in poses), "home walks both arms to their rest pose")
+    c.check(all(math.isclose(pose[6], 30.0) for pose in poses), "home leaves the grippers as they were")
+    powered = not any(a._arm.off for a in p.arms.values()) and all(a.opened == [] for a in p.arms.values())
+    c.check(not p.parked and powered, "home is not a park: the arms stay powered, holding at rest")
+    c.check(not p.limiter.present, "after home, no command before a fresh read")
+    p.park(fps=100)
+    before = len(p.arms["left"]._arm.commands)
+    c.check(raises(p.go_home, 100) and len(p.arms["left"]._arm.commands) == before and p.parked,
+            "home on parked arms refuses: nothing moves, nothing powers up")
+    p = parking(blocked=True)
+    c.check(raises(p.go_home, 100) and not any(a._arm.off for a in p.arms.values()),
+            "a blocked arm stops home: the arms hold where they are")
+
+    p = parking()
+    p.arms["right"]._arm.raises = True
+    c.check(raises(p.park, 100) and not p.arms["left"]._arm.commands and not p.arms["left"]._arm.off,
+            "an unreadable arm: no park, nothing moves, nothing switched off")
+
+    p = parking()
+    for a in p.arms.values():
+        a._arm, a.energized = None, False
+    left = TrackingArm([0.0] * 7)
+    fake_connect(p.arms["left"], left)
+    fake_connect(p.arms["right"], None, fails=True)
+    c.check(raises(p._open_arms, True) and left.off,
+            "one arm fails to open: the one already energized is switched off where it opened")
+
+    from robot import ParkRequests
+    from utils.common import PARK_ONLY, PARK_TOGGLE
+    arms = SimpleNamespace(parked=False)
+    q = ParkRequests(arms)
+    c.check(q.ask("voice", PARK_ONLY) == "parking the arms" and q.take() == ("voice", PARK_ONLY),
+            "a spoken park on powered arms parks them")
+    q.finished()
+    arms.parked = True
+    c.check(q.ask("voice", PARK_ONLY) == "already parked" and q.take() is None,
+            "a spoken park on parked arms does nothing: never a power-up")
+    q.ask("teleop", PARK_TOGGLE)
+    c.check(q.ask("voice", PARK_ONLY) == "already parked" and q.take() is None,
+            "a spoken park drops a waiting p that would power parked arms up")
+    arms.parked = False
+    q.ask("voice", PARK_ONLY)
+    q.ask("teleop", PARK_TOGGLE)
+    c.check(q.take() == ("voice", PARK_ONLY), "a p behind a waiting spoken park cannot undo it")
+    q.finished()
+    arms.parked = True
+    q.ask("teleop", PARK_TOGGLE)
+    c.check(q.take() == ("teleop", PARK_TOGGLE), "p still toggles: parked arms power up")
+    c.check(q.ask("voice", PARK_ONLY) == "parking the arms" and q.pending == ("voice", PARK_ONLY),
+            "a spoken park during a power-up parks right after it")
+    c.check(raises(q.ask, "voice", "unpark"), "an unknown park payload is refused, not read as a toggle")
+
+    arms = SimpleNamespace(parked=False)
+    q = ParkRequests(arms)
+    c.check(q.home("voice") == "returning the arms home" and q.take() == ("voice", ParkRequests.HOME),
+            "home on powered arms queues a return to rest")
+    c.check(q.home("voice") == "returning the arms home" and q.take() is None,
+            "home during a return home queues nothing more")
+    q.finished()
+    q.home("voice")
+    c.check(q.ask("teleop", PARK_TOGGLE) == "parking the arms" and q.take() == ("teleop", PARK_TOGGLE),
+            "a p behind a waiting home parks instead")
+    q.ask("voice", PARK_ONLY)
+    c.check(q.home("voice") == "parking the arms" and q.take() == ("voice", PARK_ONLY),
+            "home behind a waiting park leaves the park")
+    q.finished()
+    arms.parked = True
+    c.check(q.home("voice").startswith("parked") and q.take() is None, "home on parked arms never powers them up")
+    q.ask("teleop", PARK_TOGGLE)
+    q.take()
+    c.check(q.home("voice") == "powering the arms up" and q.pending is None,
+            "home during a power-up queues nothing: the arms come up at rest")
+    return c.exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

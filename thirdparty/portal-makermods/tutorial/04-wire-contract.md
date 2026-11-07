@@ -1,0 +1,47 @@
+# 4. The shared schema
+
+This chapter explains the configuration used in the walkthrough. Open
+[`portal.yaml`](../portal.yaml); keep the same file on every host.
+
+## 1. Read the fields
+
+The schema declares three camera tracks and fourteen positions: six joints
+and one gripper per arm. State reports measured positions; actions request
+target positions. Joints use radians. The gripper uses the driver's normalized
+opening scaled to 0–100 (closed to open); see
+[`metal.py`](../src/utils/metal.py).
+
+The schema sets a 30 Hz rate and H264 video. Keep these defaults for the walkthrough.
+All three declared cameras must publish before operators can anchor actions
+to a complete camera view.
+
+## 2. Load the same schema for every role
+
+```python
+robot_cfg = RobotConfig.from_yaml_file(CONFIG_PATH, room)
+operator_cfg = OperatorConfig.from_yaml_file(CONFIG_PATH, room)
+observer_cfg = ObserverConfig.from_yaml_file(CONFIG_PATH, room)
+```
+
+Teleop, Dream-1, and ACT all use `OperatorConfig`. Mismatched schemas produce
+fingerprint warnings and dropped packets, so deploy schema changes to every
+peer together.
+
+## 3. Preserve training order
+
+ACT reads state and action order from the training dataset's `meta/info.json`
+and checks the names against the schema. Do not alphabetize fields: model
+tensors and normalization statistics use the dataset's order.
+
+## Transport defaults
+
+H264 carries video over WebRTC media. State and actions use unreliable packets
+so a lost packet does not hold up newer readings. Keypoints and control messages
+use reliable delivery.
+
+Other video formats are available, but keep H264 unless your application needs
+a different transport.
+
+---
+
+Previous: [3. Train ACT and improve it with corrections](03-train-act.md) · [Tutorial index](../README.md#the-tutorial) · Next: [5. Robot loop](05-robot-loop.md)
