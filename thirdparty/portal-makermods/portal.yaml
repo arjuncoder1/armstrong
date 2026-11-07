@@ -12,9 +12,9 @@ reuse_stale_frames: true
 # wrist. Left and right are as the robot sees them (standing behind the arms,
 # facing the workspace).
 videos:
-  - { name: overhead_camera, codec: h264, max_bitrate_kbps: 20000, screencast: true }
-  - { name: left_wrist_camera, codec: h264, max_bitrate_kbps: 20000, screencast: true }
-  - { name: right_wrist_camera, codec: h264, max_bitrate_kbps: 20000, screencast: true }
+  - { name: overhead_camera, codec: vp8, max_bitrate_kbps: 20000, screencast: true }
+  - { name: left_wrist_camera, codec: vp8, max_bitrate_kbps: 20000, screencast: true }
+  - { name: right_wrist_camera, codec: vp8, max_bitrate_kbps: 20000, screencast: true }
 
 # The selected arm's own joint frame: joint1..joint6 in radians, the gripper
 # as stroke in mm: 0 closed to 100 open for Metal, 80 for Maker Arm v1.
