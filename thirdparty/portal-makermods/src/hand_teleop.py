@@ -31,8 +31,20 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from utils.common import (CONFIG_PATH, HardwareThread, claim_or_release, env_camera_id, env_float, env_int, env_str,
-                          hand_teleop_identity, load_env, mint_token, pace, request_park, required_env)
+from utils.common import (CONFIG_PATH, HOME_RPC, ROBOT_IDENTITY, HardwareThread, claim_or_release, env_camera_id,
+                          env_float, env_int, env_str, hand_teleop_identity, load_env, mint_token, pace, request_park,
+                          required_env)
+
+HOME_CONFIRM_S = 3.0  # `h` twice within this homes the arms; a home opens both grippers
+HOME_CONFIRMED = "grippers_empty"  # the home RPC payload saying both grippers are empty (manifest_bridge)
+
+
+async def request_home(op) -> None:
+    """Ask the robot to walk both arms home; through Manifest (manifest_bridge) that opens both grippers."""
+    try:
+        print(f"[hands] robot: {await op.perform_rpc(HOME_RPC, payload=HOME_CONFIRMED, destination=ROBOT_IDENTITY)}")
+    except Exception as exc:
+        print(f"[hands] home request failed: {exc}; press h twice to retry")
 from utils.hands import (BONES, INDEX_TIP, THUMB_TIP, ArmFollower, ArmsIK, Clutch, Hand, HandPose, HandSize, Mapping,
                          assign_sides, camera_to_base, hand_pose, turn_between)
 from utils.hotkeys import Hotkeys, input_backend_warning
@@ -413,8 +425,9 @@ async def main() -> None:
         print("[hands] curl middle, ring and pinky into the palm to grip an arm; thumb to index sets its gripper; "
               "lift one out to let go" + ("" if args.rotate == "off" else "; turning the hand turns the gripper"))
         print("[hands] " + ("offline: nothing is sent; x quits" if args.offline else
-                            "c takes or releases control, p parks, x quits"))
+                            "c takes or releases control, h twice homes, p parks, x quits"))
         shown_seq = 0
+        home_asked = 0.0
         async for tick in pace(fps):
             keys = set(hotkeys.drain())
             if browser:
@@ -426,6 +439,14 @@ async def main() -> None:
                     await claim_or_release(op, "hands")
                 if "p" in keys:
                     await request_park(op, "hands")
+                if "h" in keys:
+                    if time.monotonic() - home_asked < HOME_CONFIRM_S:
+                        home_asked = 0.0
+                        await request_home(op)
+                    else:
+                        home_asked = time.monotonic()
+                        print(f"[hands] h again within {HOME_CONFIRM_S:.0f} s homes both arms: it OPENS both "
+                              "grippers, so neither may hold anything")
 
             now = time.monotonic()
             sighting = webcam.latest()
@@ -459,7 +480,7 @@ async def main() -> None:
             if sighting is not None and sighting.seq != shown_seq:
                 shown_seq = sighting.seq
                 status = ("offline" if op is None else "control: yes" if mine else
-                          "control: no (press c)" if op.active_operator() != op.local_identity() else
+                          "control: no (c takes it, h twice homes)" if op.active_operator() != op.local_identity() else
                           "control: yes, no fresh robot view")
                 if browser:
                     following = [side for side, arm in pilot.arms.items() if arm.follower.engaged]

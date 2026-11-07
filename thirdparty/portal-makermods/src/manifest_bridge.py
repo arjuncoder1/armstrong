@@ -10,7 +10,9 @@ operator takes control (`c` in hand-teleop), it opens the station's CV lease; th
 actions go through Portal's own step limiter and soft-limit clamp, then to the station, which writes
 them only while the lease holds and checks each target against the measured arm. Releasing control,
 the operator leaving, or any station refusal ends the lease and releases control. While no operator
-has control, Manifest's own tasks and teaching run as usual. Park and home stay Manifest's.
+has control, Manifest's own tasks and teaching run as usual. Park stays Manifest's. The home RPC
+(`h` twice in hand-teleop), with payload "grippers_empty" because it opens both grippers, releases
+control and runs Manifest's native home.
 """
 from __future__ import annotations
 
@@ -39,6 +41,7 @@ MAX_LAG_RAD = 0.1
 IMAGE_EVERY_S = 0.2  # the station encodes its camera JPEGs at 5 fps
 TRACKS = {"top": "overhead_camera", "left": "left_wrist_camera", "right": "right_wrist_camera"}
 WIDTH = 640
+HOME_CONFIRMED = "grippers_empty"  # the home RPC payload: Manifest's native home opens both grippers
 
 
 def post(route: str, body: dict | None = None, timeout: float = 3.0) -> dict:
@@ -84,6 +87,16 @@ def station_command(target: dict[str, float]) -> tuple[dict, dict]:
     return joints, grippers
 
 
+def home() -> str:
+    """Manifest's native home: both arms to their home pose, grippers open. Blocks until it ends."""
+    seen = post("/supervisor/preview")
+    lease = post("/supervisor/home", {"observation_id": seen["observation_id"], "grippers_empty": True},
+                 timeout=90).get("lease") or {}
+    if lease.get("reached_home"):
+        return "home reached; c gives an operator control"
+    return f"home not reached ({lease.get('reason')}; joint error {lease.get('max_joint_error_rad')})"
+
+
 class Lease:
     """The station's CV lease, held while an operator has control."""
 
@@ -116,6 +129,7 @@ async def main() -> None:
     frames: dict[str, np.ndarray] = {}
     next_image = 0.0
     last_problem = ""
+    home_from: str | None = None  # who asked for a home the loop has not run yet
 
     def on_action(action: Action) -> None:
         nonlocal latest
@@ -141,8 +155,15 @@ async def main() -> None:
             lease.id = None
         await robot.set_active_operator(None)
 
+    def on_home(data) -> str:
+        nonlocal home_from
+        if data.payload != HOME_CONFIRMED:
+            return f"Manifest's home opens both grippers: confirm with payload {HOME_CONFIRMED!r} (h twice in hand-teleop)"
+        home_from = data.caller_identity
+        return "homing both arms through Manifest: control released, grippers opening"
+
     robot.register_rpc_method(PARK_RPC, lambda data: "Manifest powers these arms: park from its GUI")
-    robot.register_rpc_method(HOME_RPC, lambda data: "Manifest homes these arms: use its GUI")
+    robot.register_rpc_method(HOME_RPC, on_home)
     robot.on_action(on_action)
     robot.on_active_operator_changed(on_active_operator_changed)
     robot.on_operator_left(on_operator_left)
@@ -152,6 +173,18 @@ async def main() -> None:
         await robot.connect(url, mint_token(ROBOT_IDENTITY, room))
         print(f"[bridge] connected; {cfg.fps} fps; c in an operator takes control through Manifest's lease")
         async for _ in pace(cfg.fps):
+            if home_from:
+                who, home_from = home_from, None
+                print(f"[bridge] {who} asked for home: releasing control ...")
+                latest, wanted = {}, None
+                await robot.set_active_operator(None)  # an operator's next action would pull the arms back out
+                try:
+                    await station.run(lease.close)
+                    print(f"[bridge] {await station.run(home)}")
+                except Exception as exc:
+                    lease.id = None
+                    print(f"[bridge] home failed: {exc}")
+                continue
             if wanted and lease.id is None:
                 print(f"[bridge] {wanted} has control: opening Manifest's lease ...")
                 try:
