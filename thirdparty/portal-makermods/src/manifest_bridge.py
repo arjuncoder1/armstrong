@@ -11,8 +11,9 @@ actions go through Portal's own step limiter and soft-limit clamp, then to the s
 them only while the lease holds and checks each target against the measured arm. Releasing control,
 the operator leaving, or any station refusal ends the lease and releases control. While no operator
 has control, Manifest's own tasks and teaching run as usual. Park stays Manifest's. The home RPC
-(`h` twice in hand-teleop), with payload "grippers_empty" because it opens both grippers, releases
-control and runs Manifest's native home.
+(`h` then `y` in hand-teleop), with payload "grippers_empty" because it opens both grippers, from
+the operator in control or anyone while nobody is, releases control and runs Manifest's native home.
+An action older than ACTION_STALE_S is never replayed: if the operator goes quiet, the arms hold.
 """
 from __future__ import annotations
 
@@ -35,9 +36,11 @@ from utils.metal import StepLimiter, arm_fields, clamp_to_limits, gripper_max_mm
 STATION = os.environ.get("MANIFEST_STATION_URL", "http://127.0.0.1:8091")
 SIDES = ("left", "right")
 # How far a target may lead its joint. Leading is what lifts against gravity (the station has no
-# feedforward); it also bounds the push on something in the way: lift kp 150 * 0.1 = 15 N.m, under
-# the RS02's 17 N.m peak. The station refuses a target past 0.12.
-MAX_LAG_RAD = 0.1
+# feedforward); it also bounds the push on something in the way: lift kp 150 * 0.08 = 12 N.m, under
+# the RS02's 17 N.m peak. The station refuses a target past 0.12; the 0.04 left covers the age of
+# the state the lead is measured against.
+MAX_LAG_RAD = 0.08
+ACTION_STALE_S = 0.25  # an operator action older than this is never replayed: the arms hold
 IMAGE_EVERY_S = 0.2  # the station encodes its camera JPEGs at 5 fps
 TRACKS = {"top": "overhead_camera", "left": "left_wrist_camera", "right": "right_wrist_camera"}
 WIDTH = 640
@@ -54,13 +57,20 @@ def post(route: str, body: dict | None = None, timeout: float = 3.0) -> dict:
         raise RuntimeError(json.loads(exc.read() or b"{}").get("error") or f"station HTTP {exc.code}") from None
 
 
-def portal_state(measured: dict) -> dict[str, float]:
-    """Both arms as Portal state, or {} unless both are read: never half a row."""
+def portal_state(measured: dict, commanded: bool = False) -> dict[str, float]:
+    """Both arms as Portal state, or {} unless both are read: never half a row.
+
+    `commanded` gives the station's last targets where it reports them: an operator that takes over or lets
+    go starts from those, so a held arm keeps its gravity lead and a closed gripper keeps squeezing.
+    """
     if any(side not in measured for side in SIDES):
         return {}
     state = {}
     for side in SIDES:
-        values = list(measured[side]["positions_rad"]) + [float(measured[side]["gripper"]) * gripper_max_mm()]
+        arm = measured[side]
+        joints = (commanded and arm.get("commanded_rad")) or arm["positions_rad"]
+        grip = arm.get("commanded_gripper") if commanded else None
+        values = list(joints) + [float(arm["gripper"] if grip is None else grip) * gripper_max_mm()]
         state.update(zip(arm_fields(side), map(float, values)))
     return state
 
@@ -130,10 +140,21 @@ async def main() -> None:
     next_image = 0.0
     last_problem = ""
     home_from: str | None = None  # who asked for a home the loop has not run yet
+    homing: asyncio.Task | None = None  # the station's home, run off the loop so video keeps flowing
+    latest_at = 0.0
 
     def on_action(action: Action) -> None:
-        nonlocal latest
-        latest = {k: float(v) for k, v in action.values.items()}
+        nonlocal latest, latest_at
+        latest, latest_at = {k: float(v) for k, v in action.values.items()}, time.monotonic()
+
+    def is_homing() -> bool:
+        return homing is not None and not homing.done()
+
+    async def run_home() -> None:
+        try:
+            print(f"[bridge] {await asyncio.to_thread(home)}")
+        except Exception as exc:
+            print(f"[bridge] home failed: {exc}")
 
     def on_active_operator_changed(identity: str | None) -> None:
         nonlocal latest, wanted
@@ -158,7 +179,12 @@ async def main() -> None:
     def on_home(data) -> str:
         nonlocal home_from
         if data.payload != HOME_CONFIRMED:
-            return f"Manifest's home opens both grippers: confirm with payload {HOME_CONFIRMED!r} (h twice in hand-teleop)"
+            return f"Manifest's home opens both grippers: confirm with payload {HOME_CONFIRMED!r} (h then y in hand-teleop)"
+        holder = robot.active_operator()
+        if holder not in (None, data.caller_identity):
+            return f"{holder} has control: only they can home the arms"
+        if is_homing() or home_from:
+            return "already homing"
         home_from = data.caller_identity
         return "homing both arms through Manifest: control released, grippers opening"
 
@@ -180,10 +206,13 @@ async def main() -> None:
                 await robot.set_active_operator(None)  # an operator's next action would pull the arms back out
                 try:
                     await station.run(lease.close)
-                    print(f"[bridge] {await station.run(home)}")
                 except Exception as exc:
                     lease.id = None
-                    print(f"[bridge] home failed: {exc}")
+                    print(f"[bridge] closing the lease: {exc}")
+                homing = asyncio.create_task(run_home())
+                continue
+            if wanted and lease.id is None and is_homing():
+                await release("the arms are homing: wait for it to finish")
                 continue
             if wanted and lease.id is None:
                 print(f"[bridge] {wanted} has control: opening Manifest's lease ...")
@@ -212,7 +241,7 @@ async def main() -> None:
                 if lease.id:
                     await release("station unreadable")
                 continue
-            state = portal_state(obs.get("measured", {}))
+            state = portal_state(obs.get("measured", {}))  # measured: what the step limiter leads from
             problem = obs.get("problem") or ("" if state else "an arm is not reporting")
             if problem != last_problem:
                 last_problem = problem
@@ -222,19 +251,19 @@ async def main() -> None:
                 frames.update(decode(obs.get("images", [])))
             if state:  # never invent a state; keep the video
                 limiter.present.update(state)
-                robot.send_state(state, timestamp_us=ts_us)
+                robot.send_state(portal_state(obs["measured"], commanded=True), timestamp_us=ts_us)
             for name, frame in frames.items():
                 robot.send_video_frame(name, frame, timestamp_us=ts_us)
 
             if lease.id:
+                fresh = latest and time.monotonic() - latest_at < ACTION_STALE_S
                 try:
-                    if latest and state:
+                    if fresh and state:
                         await station.run(lease.send, *station_command(clamp_to_limits(limiter.step(latest))))
                     else:
                         await station.run(lease.send, {}, {})  # keeps the lease: no target, nothing written
                 except Exception as exc:
-                    lease.id = None  # the station ended it
-                    await release(f"Manifest stopped the arms: {exc}")
+                    await release(f"Manifest stopped the arms: {exc}")  # close() still sends the stop
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n[bridge] stopping ...")
     finally:

@@ -35,7 +35,7 @@ from utils.common import (CONFIG_PATH, HOME_RPC, ROBOT_IDENTITY, HardwareThread,
                           env_float, env_int, env_str, hand_teleop_identity, load_env, mint_token, pace, request_park,
                           required_env)
 
-HOME_CONFIRM_S = 3.0  # `h` twice within this homes the arms; a home opens both grippers
+HOME_CONFIRM_S = 3.0  # `y` within this after `h` homes the arms; a home opens both grippers
 HOME_CONFIRMED = "grippers_empty"  # the home RPC payload saying both grippers are empty (manifest_bridge)
 
 
@@ -44,7 +44,7 @@ async def request_home(op) -> None:
     try:
         print(f"[hands] robot: {await op.perform_rpc(HOME_RPC, payload=HOME_CONFIRMED, destination=ROBOT_IDENTITY)}")
     except Exception as exc:
-        print(f"[hands] home request failed: {exc}; press h twice to retry")
+        print(f"[hands] home request failed: {exc}; press h then y to retry")
 from utils.hands import (BONES, INDEX_TIP, THUMB_TIP, ArmFollower, ArmsIK, Clutch, Hand, HandPose, HandSize, Mapping,
                          assign_sides, camera_to_base, hand_pose, turn_between)
 from utils.hotkeys import Hotkeys, input_backend_warning
@@ -252,9 +252,13 @@ class Pilot:
                     arm.events.append("let go: no control or no fresh robot view")
             return None
         gripping = [side for side, arm in self.arms.items() if arm.clutch.closed and arm.hand is not None]
+        full = state is not None and all(name in state for side in SIDES for name in arm_fields(side))
         if self.q is None:
-            if not gripping or state is None or any(name not in state for side in SIDES for name in arm_fields(side)):
+            if not gripping or not full:
                 return None
+            self.take_over(state)
+        elif full and not any(arm.follower.engaged for arm in self.arms.values()):
+            # Nothing held: start the next grip from where the arms were sent, not where a hand had got to.
             self.take_over(state)
         for side, arm in self.arms.items():
             if side in gripping and not arm.follower.engaged:
@@ -264,6 +268,8 @@ class Pilot:
                                                  if arm.follower.grip_waiting else ""))
             elif side not in gripping and arm.follower.engaged:
                 arm.follower.release()
+                if full:  # hold where the arm was sent; the integrated target can run ahead of it
+                    self.q[side] = np.array([state[name] for name in arm_fields(side)[:6]])
                 arm.events.append("let go: holding")
         engaged = [side for side, arm in self.arms.items() if arm.follower.engaged]
         if not engaged:
@@ -425,7 +431,7 @@ async def main() -> None:
         print("[hands] curl middle, ring and pinky into the palm to grip an arm; thumb to index sets its gripper; "
               "lift one out to let go" + ("" if args.rotate == "off" else "; turning the hand turns the gripper"))
         print("[hands] " + ("offline: nothing is sent; x quits" if args.offline else
-                            "c takes or releases control, h twice homes, p parks, x quits"))
+                            "c takes or releases control, h then y homes, p parks, x quits"))
         shown_seq = 0
         home_asked = 0.0
         async for tick in pace(fps):
@@ -439,14 +445,13 @@ async def main() -> None:
                     await claim_or_release(op, "hands")
                 if "p" in keys:
                     await request_park(op, "hands")
-                if "h" in keys:
-                    if time.monotonic() - home_asked < HOME_CONFIRM_S:
-                        home_asked = 0.0
-                        await request_home(op)
-                    else:
-                        home_asked = time.monotonic()
-                        print(f"[hands] h again within {HOME_CONFIRM_S:.0f} s homes both arms: it OPENS both "
-                              "grippers, so neither may hold anything")
+                if "y" in keys and time.monotonic() - home_asked < HOME_CONFIRM_S:
+                    home_asked = 0.0
+                    await request_home(op)
+                elif "h" in keys:  # a held h only re-arms the question; y is the confirmation
+                    home_asked = time.monotonic()
+                    print(f"[hands] y within {HOME_CONFIRM_S:.0f} s homes both arms: it OPENS both "
+                          "grippers, so neither may hold anything")
 
             now = time.monotonic()
             sighting = webcam.latest()
