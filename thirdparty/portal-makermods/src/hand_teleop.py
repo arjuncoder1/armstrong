@@ -78,14 +78,15 @@ class Webcam:
     `source` is a camera index (a /dev/videoN path on Linux) or a video file, played in real time.
     """
 
-    def __init__(self, source: int | str, width: int, height: int) -> None:
+    def __init__(self, source: int | str, width: int, height: int, capture=None) -> None:
         self.source, self.width, self.height = source, width, height
         self.frames, self.errors = 0, 0
         self._latest: Optional[Sighting] = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._capture = self._landmarker = None
+        self._capture = capture
+        self._landmarker = None
         self._file_fps = 0.0
 
     def start(self) -> None:
@@ -98,7 +99,8 @@ class Webcam:
             running_mode=vision.RunningMode.VIDEO, num_hands=2,
             min_hand_detection_confidence=0.5, min_hand_presence_confidence=0.5, min_tracking_confidence=0.5))
         # Opened here, on the main thread: macOS asks for camera access from it.
-        self._capture = cv2.VideoCapture(self.source)
+        if self._capture is None:
+            self._capture = cv2.VideoCapture(self.source)
         if not self._capture.isOpened():
             raise RuntimeError(f"webcam {self.source!r} did not open (HAND_CAMERA; on macOS, allow camera access "
                                "for this terminal under System Settings > Privacy & Security > Camera)")
@@ -115,7 +117,7 @@ class Webcam:
         seq = 0
         while not self._stop.is_set():
             ok, bgr = self._capture.read()
-            now = time.monotonic()
+            now = getattr(self._capture, "at", time.monotonic())
             if not ok:
                 self.errors += 1
                 time.sleep(0.05)
@@ -346,7 +348,14 @@ async def main() -> None:
     parser.add_argument("--rotate", choices=("full", "yaw", "off"), default=env_str("HAND_ROTATE", "full"),
                         help="what the hand's turning does to the gripper (default: full, it turns as the hand "
                              "does; yaw: about vertical only; off: it keeps its orientation)")
+    parser.add_argument("--browser", action="store_true", help="use the viewing laptop's browser camera")
+    parser.add_argument("--browser-host", default="127.0.0.1")
+    parser.add_argument("--browser-port", type=int, default=8081)
     args = parser.parse_args()
+    browser = None
+    if args.browser:
+        from utils.browser_hands import BrowserHands
+        browser = BrowserHands()
 
     if args.offline:
         cfg, url, room, fps, cameras = None, "", "offline", env_int("PORTAL_FPS", 30), []
@@ -357,11 +366,12 @@ async def main() -> None:
         cfg = OperatorConfig.from_yaml_file(CONFIG_PATH, room)
         fps, cameras = env_int("PORTAL_FPS", cfg.fps), list(cfg.video_tracks)
 
-    width, height = env_int("HAND_CAMERA_WIDTH", 640), env_int("HAND_CAMERA_HEIGHT", 480)
+    width, height = (640, 480) if browser else (env_int("HAND_CAMERA_WIDTH", 640), env_int("HAND_CAMERA_HEIGHT", 480))
     worker = HardwareThread("hand-ik")  # the IK off the event loop
     ik = ArmsIK(fps, env_float("HAND_TABLE_Z_M", 0.0), env_float("HAND_MAX_JOINT_RAD_S", 1.5))
     pilot = build_pilot(fps, ik, args.rotate, width)
-    webcam = Webcam(env_camera_id("HAND_CAMERA", "0"), width, height)
+    webcam = Webcam(0 if browser else env_camera_id("HAND_CAMERA", "0"), width, height,
+                    capture=browser.capture if browser else None)
     hotkeys = Hotkeys(global_tap=env_int("PORTAL_HOTKEYS_GLOBAL", 1) != 0)
     rest = {name: value for side in SIDES  # offline: both arms at the IK's rest, grippers half open
             for name, value in zip(arm_fields(side), [*ik.rest, 50.0])}
@@ -373,7 +383,10 @@ async def main() -> None:
         print("[hands] compiling the IK (a few seconds the first time) ...")
         await worker.run(ik.warmup)
         webcam.start()
-        preview = Preview(room, cameras + [WEBCAM_VIEW], port=HAND_TELEOP_VIEWER_PORT)
+        if browser:
+            await browser.start(args.browser_host, args.browser_port)
+        else:
+            preview = Preview(room, cameras + [WEBCAM_VIEW], port=HAND_TELEOP_VIEWER_PORT)
         if not args.offline:
             from livekit.portal import Operator, frame_bytes_to_numpy_rgb
 
@@ -403,7 +416,9 @@ async def main() -> None:
                             "c takes or releases control, p parks, x quits"))
         shown_seq = 0
         async for tick in pace(fps):
-            keys = hotkeys.drain()
+            keys = set(hotkeys.drain())
+            if browser:
+                keys.update(browser.drain())
             if "x" in keys:
                 break
             if op is not None:
@@ -427,11 +442,14 @@ async def main() -> None:
                 mine = op.active_operator() == op.local_identity()
                 state = obs.state if fresh else None
                 mine = mine and fresh
-                if obs is not None and obs.timestamp_us != shown_ts:
+                if preview is not None and obs is not None and obs.timestamp_us != shown_ts:
                     shown_ts = obs.timestamp_us
                     for name, frame in obs.frames.items():
                         preview.show(name, frame_bytes_to_numpy_rgb(frame.data, frame.width, frame.height))
 
+            if browser and not browser.fresh:
+                mine = False
+                pilot.drop()
             action = await worker.run(pilot.tick, mine, state)
             for line in pilot.drain_events():
                 print(f"[hands] {line}")
@@ -443,7 +461,11 @@ async def main() -> None:
                 status = ("offline" if op is None else "control: yes" if mine else
                           "control: no (press c)" if op.active_operator() != op.local_identity() else
                           "control: yes, no fresh robot view")
-                preview.show(WEBCAM_VIEW, draw(sighting, pilot, status))
+                if browser:
+                    following = [side for side, arm in pilot.arms.items() if arm.follower.engaged]
+                    browser.status = status + "; following: " + (", ".join(following) or "none")
+                else:
+                    preview.show(WEBCAM_VIEW, draw(sighting, pilot, status))
 
             if tick and tick % (fps * 5) == 0:
                 held = [side for side, arm in pilot.arms.items() if arm.follower.engaged] or ["none"]
@@ -454,6 +476,8 @@ async def main() -> None:
         print("\n[hands] stopping")
     finally:
         hotkeys.stop()
+        if browser:
+            await browser.stop()
         webcam.stop()
         if preview is not None:
             preview.close()

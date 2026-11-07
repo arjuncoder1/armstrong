@@ -117,3 +117,36 @@ turned by up to half the field of view.
 
 The operator's actions are ordinary Portal actions: the recorder archives them during a take, but
 takes are still marked from the leader-arm teleop (`r`).
+
+## Laptop camera through a browser
+
+Run this on the robot host to use the camera on the laptop viewing the page:
+
+```bash
+uv run --group hands hand-teleop --browser --offline
+# After checking the preview, restart with the robot service running:
+uv run --group hands hand-teleop --browser
+```
+
+The terminal prints a URL containing a private session token. On your laptop, forward the
+browser port over SSH (replace `USER` with your robot host login):
+
+```bash
+ssh -N -L 8081:127.0.0.1:8081 USER@10.103.1.11
+```
+
+Open the printed `http://localhost:8081/#...` URL on the laptop. Click **Start laptop camera**
+and allow camera access, then **Take / release arm control**. The page reports control and which
+arms are following. Curl middle, ring and pinky to engage; move/turn your hand and pinch to grip.
+**Stop camera & hold** stops transmission; **Park / power up** uses the existing robot park toggle.
+Offline mode never sends robot commands, including those buttons.
+
+The browser sends 640×480 JPEG frames; MediaPipe and IK run on the robot host. One camera client is
+accepted per process. No frames are recorded by this transport. Hidden tabs, closed connections,
+and frames missing for 250 ms suspend browser motion. Existing gesture and robot observation
+freshness checks still apply. Restarting tracking anchors to the robot's current state.
+
+Use HTTPS for direct remote hosting (`--browser-host` changes the bind address); browsers do not
+allow camera access at an ordinary HTTP LAN IP. The SSH localhost URL works without deploying
+certificates. Keep its session URL private. This standalone page uses port 8081 and does not change
+an existing GUI on port 8080. MediaPipe dependencies and its model must be installed before startup.

@@ -8,6 +8,7 @@ dependencies = [
     "livekit-api>=0.7",
     "lerobot[hardware]>=0.6.1",
     "numpy>=1.24",
+    "aiohttp>=3.9",  # browser camera transport
     "python-dotenv>=1",
     "opencv-python-headless>=4.10",
     "pynput>=1.7",

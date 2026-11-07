@@ -94,6 +94,8 @@ away from the fully folded calibration pose.
 For the three robot cameras, use macOS camera indices (`0`, `1`, `2`, after
 checking their views) in `METAL_CAM_OVERHEAD`, `METAL_CAM_LEFT_WRIST`, and
 `METAL_CAM_RIGHT_WRIST`. The Linux `/dev/videoN` defaults do not work on macOS.
+This checkout uses VP8 for all three cameras in `portal.yaml`: its local transport
+check delivered no H.264 frames, while VP8 passed. Keep the same schema on every peer.
 The tutorial's leader process reads matching CAN arms; a Star 102 serial
 leader needs its own integration and must not be configured as a CAN arm.
 

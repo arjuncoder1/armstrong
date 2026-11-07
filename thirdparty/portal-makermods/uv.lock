@@ -2176,6 +2176,7 @@ name = "portal-makermods"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "dreamlabs" },
     { name = "dreamlabs-client" },
     { name = "lerobot", extra = ["hardware"] },
@@ -2205,6 +2206,7 @@ voice = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.9" },
     { name = "dreamlabs", specifier = ">=1.0.23" },
     { name = "dreamlabs-client", specifier = ">=1.0.14" },
     { name = "lerobot", extras = ["hardware"], specifier = ">=0.6.1" },
