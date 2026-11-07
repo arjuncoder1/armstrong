@@ -23,7 +23,9 @@ GRIP = {"left": 0.5, "right": 0.5}
 LOG = {"starts": 0, "stops": 0, "heartbeats": 0, "writes": [], "refused": [], "homes": [],
        "actions": [], "action_beats": 0, "action_stops": 0}
 ACTION = {"id": None, "active": False, "ends": 0.0, "reason": None}
-ACTION_S = [10.0]  # how long the fake Dream-1 action runs before it completes
+ACTION_S = [10.0]  # how long the fake Dream-1 action runs before it completes (at most the seconds asked)
+END = ["duration_complete"]  # why it ends: its duration, or Dream-1 finishing ("action_complete")
+TEMPS = {"left": [40.0] * 7, "right": [40.0] * 7}
 LEASE = {"id": None}
 CV_START_S = 4.5  # the real station readies its IK this long before cv/start answers
 JPEG = base64.b64encode(cv2.imencode(".jpg", np.full((480, 640, 3), 90, np.uint8))[1]).decode()
@@ -43,7 +45,7 @@ class Station(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-        measured = {s: {"positions_rad": Q[s].tolist(), "gripper": GRIP[s]} for s in Q}
+        measured = {s: {"positions_rad": Q[s].tolist(), "gripper": GRIP[s], "motor_temps_c": TEMPS[s]} for s in Q}
         if self.path in ("/supervisor/preview", "/supervisor/observe"):
             images = [{"camera": c, "jpeg": JPEG, "age_s": 0.05} for c in ("top", "left", "right")]
             return self.reply(200, {"observation_id": "obs-1", "measured": measured, "problem": None,
@@ -55,14 +57,15 @@ class Station(BaseHTTPRequestHandler):
             if ACTION["active"] or LEASE["id"]:
                 return self.reply(409, {"error": "An action is already running"})
             LOG["actions"].append(body)
-            ACTION.update(id=uuid.uuid4().hex, active=True, ends=time.monotonic() + ACTION_S[0], reason=None)
+            ACTION.update(id=uuid.uuid4().hex, active=True, reason=None,
+                          ends=time.monotonic() + min(ACTION_S[0], body["seconds"]))
             return self.reply(200, {"status": {}, "lease": dict(ACTION)})
         if self.path == "/supervisor/heartbeat":
             if body.get("lease_id") != ACTION["id"]:
                 return self.reply(409, {"error": "Unknown action lease"})
             LOG["action_beats"] += 1
             if ACTION["active"] and time.monotonic() > ACTION["ends"]:
-                ACTION.update(active=False, reason="duration_complete")
+                ACTION.update(active=False, reason=END[0])
             return self.reply(200, {"status": {}, "lease": dict(ACTION)})
         if self.path == "/supervisor/stop":
             if body.get("lease_id") == ACTION["id"] and ACTION["active"]:
@@ -161,28 +164,51 @@ async def operator(room: str) -> None:
     await asyncio.sleep(CV_START_S + 1.0)
     print(f"homes {len(LOG['homes'])}: body {LOG['homes'][0][0] if LOG['homes'] else None}, "
           f"station lease during home {LOG['homes'][0][1] if LOG['homes'] else '-'}, control after: {op.active_operator()}")
-    # Shared autonomy: Dream-1 finishes a grasp on one arm; taking control stops it.
-    grab = lambda arm, thing="": op.perform_rpc("grab", payload=json.dumps({"arm": arm, "object": thing}), destination="robot")
+    # Shared autonomy: Dream-1 does a typed task on one arm, renewed until it ends; taking control stops it.
+    # Start the bridge with GRAB_TOTAL_S=5 for the cap below.
+    grab = lambda arm, task="": op.perform_rpc("grab", payload=json.dumps({"arm": arm, "object": task}), destination="robot")
     status = lambda: op.perform_rpc("grab", payload="status", destination="robot")
     print("grab, bad payload:", await op.perform_rpc("grab", payload="left", destination="robot"))
-    print("grab:", await grab("left", "orange cube"))
-    await asyncio.sleep(2.5)
+    ACTION_S[0] = 1.2  # each fake action runs its duration out this fast, so the bridge renews it
+    print("grab:", await grab("left", "pick up the orange cube"))
+    await asyncio.sleep(3.5)
     a = LOG["actions"][0] if LOG["actions"] else {}
-    print(f"action: arm {a.get('arm')}, gripper {a.get('gripper_mode')}, {a.get('seconds')} s, cv lease during it {LEASE['id']}, "
-          f"heartbeats {LOG['action_beats']}, object in prompt {'orange cube' in a.get('instruction', '')}")
+    print(f"renewed: {len(LOG['actions'])} actions, arm {a.get('arm')}, gripper {a.get('gripper_mode')}, first {a.get('seconds')} s, "
+          f"cv lease during it {LEASE['id']}, instructions {sorted({x['instruction'] for x in LOG['actions']})}")
     print("status while grabbing:", json.loads(await status()))
     print("grab while grabbing:", await grab("right"))
     await op.set_active_operator(op.local_identity())  # the override
     await asyncio.sleep(0.8)
+    n = len(LOG["actions"])
     print("took control: Dream-1 stopped", LOG["action_stops"] == 1, "| status", json.loads(await status())["line"])
     await asyncio.sleep(CV_START_S + 1.0)
-    print("then the CV lease opened:", LEASE["id"] is not None, "| control:", op.active_operator())
-    ACTION_S[0] = 1.5
-    print("grab right while in control:", await grab("right"))
-    await asyncio.sleep(4.0)
+    print("then the CV lease opened:", LEASE["id"] is not None, "| control:", op.active_operator(),
+          "| no renewal after the stop:", len(LOG["actions"]) == n)
+    ACTION_S[0] = 12.0
+    print("grab right while in control:", await grab("right", "pick up the blue cube with the right arm"))
+    await asyncio.sleep(2.0)
+    TEMPS["right"][2] = 56.0  # a right motor reaches Manifest's warning mid-task
+    await asyncio.sleep(1.0)
     st = json.loads(await status())
-    print(f"natural end: active {st['active']}, line {st['line']!r}, control after: {op.active_operator()}, "
-          f"cv lease {LEASE['id']}, actions {len(LOG['actions'])}")
+    print(f"heat: Dream-1 stopped {LOG['action_stops'] == 2}, active {st['active']}, line {st['line']!r}, "
+          f"instruction {LOG['actions'][n]['instruction']!r}")
+    n = len(LOG["actions"])
+    print("grab while hot:", await grab("right", "pick up the blue cube"))
+    await asyncio.sleep(1.0)
+    print(f"  no action started {len(LOG['actions']) == n}, control kept: {op.active_operator()}")
+    TEMPS["right"][2] = 40.0
+    END[0], ACTION_S[0] = "action_complete", 1.5  # Dream-1 ends the task itself: no renewal
+    print("grab, no task typed:", await grab("left"))
+    await asyncio.sleep(3.5)
+    st = json.loads(await status())
+    print(f"Dream-1 finished: actions {len(LOG['actions']) - n} (1), line {st['line']!r}, instruction "
+          f"{LOG['actions'][n]['instruction']!r}, control after: {op.active_operator()}, cv lease {LEASE['id']}")
+    n = len(LOG["actions"])
+    END[0], ACTION_S[0] = "duration_complete", 12.0  # each action runs as long as asked
+    print("grab, the cap:", await grab("left", "stack the cubes"))
+    await asyncio.sleep(6.5)
+    st = json.loads(await status())
+    print(f"cap: actions {[x['seconds'] for x in LOG['actions'][n:]]} s, active {st['active']}, line {st['line']!r}")
     await op.disconnect()
 
 
