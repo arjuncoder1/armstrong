@@ -20,7 +20,10 @@ import numpy as np
 Q = {"left": np.array([-0.054, -0.058, 0.024, -0.027, 0.111, 0.019]),
      "right": np.array([-0.085, -0.057, 0.032, -0.022, -0.009, -0.077])}
 GRIP = {"left": 0.5, "right": 0.5}
-LOG = {"starts": 0, "stops": 0, "heartbeats": 0, "writes": [], "refused": [], "homes": []}
+LOG = {"starts": 0, "stops": 0, "heartbeats": 0, "writes": [], "refused": [], "homes": [],
+       "actions": [], "action_beats": 0, "action_stops": 0}
+ACTION = {"id": None, "active": False, "ends": 0.0, "reason": None}
+ACTION_S = [10.0]  # how long the fake Dream-1 action runs before it completes
 LEASE = {"id": None}
 CV_START_S = 4.5  # the real station readies its IK this long before cv/start answers
 JPEG = base64.b64encode(cv2.imencode(".jpg", np.full((480, 640, 3), 90, np.uint8))[1]).decode()
@@ -48,7 +51,27 @@ class Station(BaseHTTPRequestHandler):
         if self.path == "/supervisor/home":
             LOG["homes"].append((body, LEASE["id"]))
             return self.reply(200, {"lease": {"reached_home": True, "reason": "home_reached"}})
+        if self.path == "/supervisor/action":
+            if ACTION["active"] or LEASE["id"]:
+                return self.reply(409, {"error": "An action is already running"})
+            LOG["actions"].append(body)
+            ACTION.update(id=uuid.uuid4().hex, active=True, ends=time.monotonic() + ACTION_S[0], reason=None)
+            return self.reply(200, {"status": {}, "lease": dict(ACTION)})
+        if self.path == "/supervisor/heartbeat":
+            if body.get("lease_id") != ACTION["id"]:
+                return self.reply(409, {"error": "Unknown action lease"})
+            LOG["action_beats"] += 1
+            if ACTION["active"] and time.monotonic() > ACTION["ends"]:
+                ACTION.update(active=False, reason="duration_complete")
+            return self.reply(200, {"status": {}, "lease": dict(ACTION)})
+        if self.path == "/supervisor/stop":
+            if body.get("lease_id") == ACTION["id"] and ACTION["active"]:
+                LOG["action_stops"] += 1
+                ACTION.update(active=False, reason="operator_stop")
+            return self.reply(200, {"status": {}, "lease": dict(ACTION)})
         if self.path == "/supervisor/cv/start":
+            if ACTION["active"]:
+                return self.reply(409, {"error": "Stop the current task or teaching session before CV teleop"})
             time.sleep(CV_START_S)
             LEASE["id"] = uuid.uuid4().hex
             LOG["starts"] += 1
@@ -138,6 +161,28 @@ async def operator(room: str) -> None:
     await asyncio.sleep(CV_START_S + 1.0)
     print(f"homes {len(LOG['homes'])}: body {LOG['homes'][0][0] if LOG['homes'] else None}, "
           f"station lease during home {LOG['homes'][0][1] if LOG['homes'] else '-'}, control after: {op.active_operator()}")
+    # Shared autonomy: Dream-1 finishes a grasp on one arm; taking control stops it.
+    grab = lambda arm, thing="": op.perform_rpc("grab", payload=json.dumps({"arm": arm, "object": thing}), destination="robot")
+    status = lambda: op.perform_rpc("grab", payload="status", destination="robot")
+    print("grab, bad payload:", await op.perform_rpc("grab", payload="left", destination="robot"))
+    print("grab:", await grab("left", "orange cube"))
+    await asyncio.sleep(2.5)
+    a = LOG["actions"][0] if LOG["actions"] else {}
+    print(f"action: arm {a.get('arm')}, gripper {a.get('gripper_mode')}, {a.get('seconds')} s, cv lease during it {LEASE['id']}, "
+          f"heartbeats {LOG['action_beats']}, object in prompt {'orange cube' in a.get('instruction', '')}")
+    print("status while grabbing:", json.loads(await status()))
+    print("grab while grabbing:", await grab("right"))
+    await op.set_active_operator(op.local_identity())  # the override
+    await asyncio.sleep(0.8)
+    print("took control: Dream-1 stopped", LOG["action_stops"] == 1, "| status", json.loads(await status())["line"])
+    await asyncio.sleep(CV_START_S + 1.0)
+    print("then the CV lease opened:", LEASE["id"] is not None, "| control:", op.active_operator())
+    ACTION_S[0] = 1.5
+    print("grab right while in control:", await grab("right"))
+    await asyncio.sleep(4.0)
+    st = json.loads(await status())
+    print(f"natural end: active {st['active']}, line {st['line']!r}, control after: {op.active_operator()}, "
+          f"cv lease {LEASE['id']}, actions {len(LOG['actions'])}")
     await op.disconnect()
 
 
