@@ -54,7 +54,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.dash.drain(), set())
         for good in ('grab left', 'grab right orange cube', "grab left kid's red cup"):
             self.assertEqual((await self.client.post('/command' + self.t, data=good)).status, 200, good)
-        for bad in ('grab', 'grab both', 'grab left cube!', 'grab left a;rm -rf', 'grab right ' + 'x' * 81):
+        for bad in ('grab', 'grab both', 'grab left cube!', 'grab left a;rm -rf', 'grab right ' + 'x' * 161):
             self.assertEqual((await self.client.post('/command' + self.t, data=bad)).status, 400, bad)
         self.assertEqual(self.dash.drain(), {'grab left', 'grab right orange cube', "grab left kid's red cup"})
         self.dash.status = {'control': 'nobody'}

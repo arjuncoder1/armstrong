@@ -18,7 +18,7 @@ import numpy as np
 from aiohttp import WSMsgType, web
 
 COMMANDS = {"c", "release", "home"}  # take or release control, release only, home (confirmed on the page)
-GRAB = re.compile(r"grab (left|right)(?: [\w .,'/-]{1,80})?")  # hand an arm to Dream-1, optionally naming the object
+GRAB = re.compile(r"grab (left|right)(?: [\w .,'/-]{1,160})?")  # hand an arm to Dream-1, optionally with its task
 VIEW_FPS = {"tracking": 24}  # MJPEG rate per view; robot cameras default to 10
 
 PAGE = r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
@@ -65,10 +65,10 @@ input{font:inherit;color:var(--text);background:#2a2a2a;border:1px solid #444;bo
   <span class="muted">following</span></div>
  </div>
  <div class="panel"><div class="muted" style="margin-bottom:8px">Dream-1 grab</div>
-  <input id="object" maxlength="80" placeholder="what to grab, e.g. orange cube">
+  <input id="object" maxlength="160" placeholder="what to do, e.g. pick up the blue cube">
   <div class="row"><button id="grabL">Grab with left</button><button id="grabR">Grab with right</button></div>
-  <div class="muted" id="grabLine">Steer a gripper up to the object, then Grab (or g): Dream-1 closes it and lifts.
-  Take control stops it.</div></div>
+  <div class="muted" id="grabLine">Type the task, steer a gripper near the object, then Grab (or g): Dream-1 does the
+  task with that arm for up to a minute. Take control stops it.</div></div>
  <div class="panel"><table><thead><tr><th>Joint</th><th>Left</th><th>Right</th></tr></thead><tbody id="joints"></tbody></table></div>
  <div class="panel stats">
   <span class="muted">Webcam</span><b id="fps">-</b><span class="muted">IK solve</span><b id="ik">-</b>
@@ -92,7 +92,7 @@ function pill(el,cls,text){el.className='pill '+cls;el.lastElementChild.textCont
 $('#take').onclick=()=>command('c');$('#release').onclick=()=>command('release');
 $('#homeOpen').onclick=()=>$('#home').showModal();$('#homeCancel').onclick=()=>$('#home').close();
 $('#homeGo').onclick=()=>{$('#home').close();command('home');};
-function grab(side){const o=$('#object').value.trim().replace(/[^\w .,'\/-]/g,'').slice(0,80);command('grab '+side+(o?' '+o:''));}
+function grab(side){const o=$('#object').value.trim().replace(/[^\w .,'\/-]/g,'').slice(0,160);command('grab '+side+(o?' '+o:''));}
 $('#grabL').onclick=()=>grab('left');$('#grabR').onclick=()=>grab('right');
 async function poll(){
  try{const r=await fetch('/state'+q);if(!r.ok)throw Error(r.status===403?'Use the full URL printed in the terminal':'HTTP '+r.status);
