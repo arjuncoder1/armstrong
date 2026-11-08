@@ -9,6 +9,7 @@ function cardsText(cards){return cards.map(c=>`${c.rank}${c.suit}`).join('  ');}
 function render(){
  if(!game)return;
  const amount=(game.bankroll/100).toFixed(2).split('.');$('bankroll').replaceChildren(document.createTextNode('$'+Number(amount[0]).toLocaleString()));const cents=document.createElement('span');cents.textContent='.'+amount[1];$('bankroll').append(cents);
+ $('details-bankroll').textContent=dollars(game.bankroll);$('details-result').textContent=game.message;
  $('remaining').textContent=game.shoe.remaining;$('round-label').textContent=game.round?'ROUND '+String(game.round).padStart(2,'0'):'ROUND —';
  $('dealer-total').textContent=game.dealer.cards.length?game.dealer.score.total+(game.dealer.score.soft?' soft':''):'—';$('dealer-accessible').textContent=cardsText(game.dealer.cards);
  const labels=game.hands.map((h,i)=>{const el=document.createElement('div');el.className='hand-label'+(i===game.active&&game.phase==='player'?' active':'');const name=document.createElement('span');name.textContent=game.hands.length>1?'HAND '+(i+1):'YOUR HAND';const total=document.createElement('strong');total.textContent=h.cards.length?h.score.total+(h.score.soft?' soft':''):'—';const detail=document.createElement('div');detail.className='accessible-cards';detail.textContent=cardsText(h.cards);const result=document.createElement('div');result.className='accessible-cards';result.textContent=dollars(h.bet)+(h.result?' · '+h.result:'');el.append(name,total,detail,result);return el;});$('player-labels').replaceChildren(...labels);
@@ -31,6 +32,9 @@ function render(){
   $('operator-reason').textContent=game.pending.reason||'Waiting for camera confirmation. Live dealing is not enabled; an operator may record an already dealt physical card.';
   if(!$('operator').open&&dismissedToken!==operatorToken)$('operator').showModal();
  }else if($('operator').open)$('operator').close();
+ const gate=game.camera_gate;$('camera-prepare').disabled=locked||!gate||gate.busy||!waiting;
+ $('camera-verify').disabled=locked||!gate?.baseline_ready||gate.busy;
+ $('camera-gate-status').textContent=gate?.message||'Camera verification is unavailable. Operator confirmation is still available.';
  $('confirm-card').disabled=locked||!$('rank').value||!$('suit').value||!$('checked').checked;
 }
 async function action(name,extra={}){
@@ -61,6 +65,8 @@ $('operator-camera').onerror=()=>{$('camera-message').textContent='Camera unavai
 $('operator-camera').onload=()=>{$('operator-camera').hidden=false;$('camera-message').textContent='Current top-camera view. Confirm only the pending physical card.';};
 for(const id of ['rank','suit','checked'])$(id).onchange=()=>render();
 $('card-text').oninput=()=>{const match=$('card-text').value.trim().toUpperCase().match(/^(10|[2-9AJQKT])\s*([SHDC♠♥♦♣])$/);if(match){$('rank').value=match[1]==='T'?'10':match[1];$('suit').value=({S:'♠',H:'♥',D:'♦',C:'♣'})[match[2]]||match[2];}else{$('rank').value='';$('suit').value='';}render();};
+$('camera-prepare').onclick=()=>action('camera_prepare',{token:game.pending.id});
+$('camera-verify').onclick=()=>action('camera_verify',{token:game.pending.id});
 $('confirm-card').onclick=()=>action('confirm',{token:game.pending.id,rank:$('rank').value,suit:$('suit').value,checked:$('checked').checked});
 $('close-operator').onclick=()=>{dismissedToken=operatorToken;$('operator').close();};$('operator').addEventListener('cancel',()=>{dismissedToken=operatorToken;});
 $('message').onclick=()=>{if(game?.mode==='observe'&&game.pending){dismissedToken=null;render();}};

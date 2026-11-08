@@ -71,7 +71,7 @@ export async function createScene(canvas){
    let mesh=cards.get(item.card.id);
    if(!mesh){mesh=makeCard(item.card);cards.set(item.card.id,mesh);scene.add(mesh);
     if(g.mode==='practice'&&!reduce){mesh.position.copy(shoePos);mesh.rotation.set(0,Math.PI,-.12);animations.push({kind:'practice',mesh,to:item.pos,path:practicePath(item.pos),angle:item.angle,start:performance.now(),duration:1800});}
-    else{mesh.position.copy(item.pos);mesh.rotation.z=item.angle;}
+    else{mesh.position.copy(item.pos);mesh.rotation.z=item.angle;if(g.mode==='observe')fadeIn(mesh);}
    }else if(!animations.some(a=>a.mesh===mesh)){mesh.position.copy(item.pos);mesh.rotation.z=item.angle;}
   }
   for(const mesh of cards.values())mesh.visible=!cameraMode;
