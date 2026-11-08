@@ -9,6 +9,7 @@ MCP server runs with MANIFEST_MCP_EXECUTE=1; otherwise every task is shadow mode
 Models: VOICE_STT, VOICE_LLM, VOICE_TTS, VOICE_TTS_VOICE, as in voice_agent.py.
 """
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -104,7 +105,32 @@ async def entrypoint(ctx: JobContext) -> None:
         ),
     )
     await ctx.connect()
+    publish_tool_events(ctx, session)
     await session.generate_reply(instructions="Greet the user in one short sentence as Blackjack Robot and ask what to do.")
+
+
+TOOLS_TOPIC = "armstrong.tools"  # the web UI (frontend/app/pages/voice.vue) renders these
+
+
+def publish_tool_events(ctx: JobContext, session: AgentSession) -> None:
+    """Mirror tool lifecycle (started / progress / ended) to the room as JSON data packets."""
+    import asyncio
+
+    def send(msg: dict) -> None:
+        payload = json.dumps(msg)[:14000]  # stay under the data packet limit
+        asyncio.ensure_future(ctx.room.local_participant.publish_data(payload, reliable=True, topic=TOOLS_TOPIC))
+
+    def on_update(ev) -> None:
+        u = ev.update
+        if u.type == "tool_call_started":
+            fc = u.function_call
+            send({"type": "started", "call_id": fc.call_id, "name": fc.name, "args": fc.arguments, "t": ev.created_at})
+        elif u.type == "tool_call_updated":
+            send({"type": "progress", "call_id": u.call_id, "message": u.message, "t": ev.created_at})
+        elif u.type == "tool_call_ended":
+            send({"type": "ended", "call_id": u.call_id, "status": u.status, "message": u.message, "t": ev.created_at})
+
+    session.on("tool_execution_updated", on_update)
 
 
 def run() -> None:

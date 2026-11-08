@@ -108,3 +108,7 @@ coverage.xml
 tools/manifest/*
 !tools/manifest/plugins/
 tools/manifest/plugins/**/__pycache__/
+
+# Local YAM assets and simulation pending upstream submodule.
+/assets/robot-urdfs/
+/src/armstrong/yamsim/

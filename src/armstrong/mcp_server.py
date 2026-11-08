@@ -168,7 +168,23 @@ def _start(execute: bool, **kwargs) -> dict:
     if execute and not execute_allowed():
         execute, note = False, "execute refused: MANIFEST_MCP_EXECUTE is off on the MCP server, ran in shadow mode"
     logger.info("manifest task {} (execute={})", kwargs, execute)
-    result = summarize(_call(manifest().start_task, execute=execute, **kwargs))
+    try:
+        task = manifest().start_task(execute=execute, **kwargs)
+    except ManifestError as error:
+        # Return the reason instead of raising, so the voice agent can say it. Manifest runs one task at a time.
+        result = {"started": False, "error": f"Manifest error {error.code}: {error.message}"}
+        try:
+            items = manifest().tasks()
+            items = items.get("tasks", items) if isinstance(items, dict) else items
+            running = [summarize(t) for t in (items or []) if t.get("status") in ("starting", "running")]
+            if running:
+                result["running_tasks"] = running
+                result["hint"] = ("Another task is still running. Tell the user, then wait_task / steer_task it, "
+                                  "or stop_task it if the user wants the new job instead.")
+        except ManifestError:
+            pass
+        return result
+    result = summarize(task)
     result["shadow"] = not execute
     if note:
         result["note"] = note
@@ -209,7 +225,9 @@ def _direct(fn, *args, **kwargs) -> dict:
     try:
         return fn(*args, **kwargs)
     except DirectError as error:
-        raise RuntimeError(f"Dream-1 direct error: {error}") from error
+        # Returned, not raised, so the voice agent hears the reason (e.g. motion disabled, a move already running).
+        logger.warning("Dream-1 direct error: {}", error)
+        return {"ok": False, "error": f"Dream-1 direct error: {error}"}
 
 
 @mcp.tool()
