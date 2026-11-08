@@ -163,10 +163,10 @@ def run(drv, sim, seconds, during=None):
         if during: during()
         drv.tick()
 
-def make(sign=1.0, err=(0, 0, 0, 0, 0, 0)):
-    sim = Sim(POSE, sign, err); drv = Driver(sim)
-    # gravity sag: start where a stiff hold settles, commanded at POSE
-    drv.bus.refresh(); drv.stepper.cmd = [math.radians(x) for x in POSE[:6]] + [POSE[6]]
+def make(sign=1.0, err=(0, 0, 0, 0, 0, 0), pose=POSE):
+    sim = Sim(pose, sign, err); drv = Driver(sim)
+    # gravity sag: start where a stiff hold settles, commanded at pose
+    drv.bus.refresh(); drv.stepper.cmd = [math.radians(x) for x in pose[:6]] + [pose[6]]
     run(drv, sim, 1.0)
     return sim, drv
 
@@ -207,6 +207,22 @@ run(drv, sim, 2.0)
 jump = max(abs(a - b) for a, b in zip(sim.q[:6], before[:6]))
 check("release holds stiff where it is (< 1 deg, no snap back)", jump < 1.0, f"{jump:.3f}")
 check("stepper reseeded at the new pose", abs(math.degrees(drv.stepper.cmd[1]) - before[1]) < 3.0)
+
+# the left arm at rest (2026-11-07): the hold sags the elbow 3 deg past its soft limit (2.8) and the lift sits 0.9 deg from
+# its limit (-3.2). Zero-G must engage there without a kick, stay put, and lift out of rest with a light push.
+REST = [-1.5, -4.0, 2.8, 2.6, 5.7, -5.8, 30.0]
+sim, drv = make(pose=REST)
+held = list(sim.q)
+check("rest pose sags past the elbow limit like the real arm", held[2] < 0.5, f"elbow {held[2]:+.2f}")
+c = engage(drv, sim)
+check("engages at rest", c.state == "on", c.why)
+run(drv, sim, 2.0)
+kick = max(abs(a - b) for a, b in zip(sim.q[:6], held[:6]))
+check("no kick at rest: stays put, no trip (< 1 deg over 2 s)", c.state == "on" and kick < 1.0, f"{kick:.2f} deg, {c.why}")
+sim.ext[1] = -1.0; run(drv, sim, 0.6); sim.ext[1] = 0.0
+run(drv, sim, 0.5); let_go = list(sim.q); run(drv, sim, 2.0)
+check("a light push lifts it out of rest and it holds there", c.state == "on" and abs(let_go[1] - held[1]) > 5
+      and max(abs(a - b) for a, b in zip(sim.q[:6], let_go[:6])) < 1.0, f"lift {let_go[1] - held[1]:+.1f}, {c.why}")
 
 # model error inside the drag band: still holds
 sim, drv = make(err=(0, 0.0, 0.25, 0.1, 0, 0))
