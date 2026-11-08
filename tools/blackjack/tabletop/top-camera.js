@@ -1,3 +1,5 @@
+import './deck-reference.js';
+import './live-camera.js';
 // Actual overhead observations, kept separate from anonymous dealt-card events.
 const base=`${location.protocol}//${location.hostname}:8204`;
 const button=document.createElement('button');button.className='camera-readout';button.textContent='Overhead · reading cards…';button.setAttribute('aria-label','Show actual cards read by overhead camera');
@@ -7,10 +9,10 @@ const dialog=document.createElement('dialog');dialog.className='camera-scan';
 dialog.innerHTML='<div class="dialog-head"><span class="micro">ACTUAL OVERHEAD VIEW</span><button aria-label="Close camera view">×</button></div><h2>Overhead card reads.</h2><div class="scan-photo"><img alt="The exact overhead frame used to read these cards"><div class="scan-markers"></div></div><div class="scan-cards"></div><p class="scan-status"></p><p class="muted">These are camera suggestions: small or occluded ranks can be misread. Hand totals update only after the matching deal is verified, or you inspect and confirm its card.</p><button class="outline scan-again">Read overhead again</button>';
 document.body.append(dialog);
 let result=null,polling=false,nextScan=0,tracking=null,trackingPolling=false;
-window.cameraViewing=true;window.transferReplay=false;
-window.cameraReadStatus='reading';document.body.classList.add('camera-mode');
+window.cameraViewing=false;window.transferReplay=false;
+window.cameraReadStatus='reading';document.body.classList.remove('camera-mode');
 
-const sourceToggle=document.createElement('button');sourceToggle.className='camera-source-toggle';sourceToggle.textContent='Practice table →';document.getElementById('details').append(sourceToggle);
+const sourceToggle=document.createElement('button');sourceToggle.className='camera-source-toggle';sourceToggle.textContent='Actual camera cards →';document.getElementById('details').append(sourceToggle);
 const transferButton=document.createElement('button');transferButton.className='transfer-replay';transferButton.hidden=true;document.getElementById('details').append(transferButton);
 transferButton.onclick=()=>{window.transferReplay=!window.transferReplay;updateView();};
 function updateView(){if(!['left','right','both'].includes(result?.transfer?.holder))window.transferReplay=false;window.blackjackView?.observe(result,window.cameraViewing,window.transferReplay);if(tracking&&window.cameraViewing&&!window.transferReplay)window.blackjackView?.track(tracking);transferButton.hidden=!window.cameraViewing||!['left','right','both'].includes(result?.transfer?.holder);transferButton.textContent=window.transferReplay?'Return to live arm pose →':'View '+(result?.transfer?.holder==='both'?'shared-grip':result?.transfer?.holder+'-held')+' snapshot →';document.body.classList.toggle('camera-mode',window.cameraViewing);sourceToggle.textContent=window.cameraViewing?'Practice table →':'Actual camera cards →';window.dispatchEvent(new Event('camera-view-mode'));}
@@ -47,13 +49,14 @@ const geometryStatus=document.createElement('div');geometryStatus.className='tra
 async function pollTracking(){
  if(trackingPolling||document.hidden||!window.cameraViewing)return;trackingPolling=true;
  try{
-  const response=await fetch(base+'/tracking');if(!response.ok)return;
+  const response=await fetch(base+'/tracking?image=1');if(!response.ok)return;
   const packet=await response.json();if(typeof packet.fresh!=='boolean'||!Array.isArray(packet.cards))return;
-  tracking=packet;window.blackjackView?.track(tracking);
+  if(packet.frame_jpeg){const frame=new Image();frame.src='data:image/jpeg;base64,'+packet.frame_jpeg;await frame.decode();packet.frame_image=frame;delete packet.frame_jpeg;}
+  tracking=packet;window.blackjackView?.track(tracking);window.dispatchEvent(new CustomEvent('camera-tracking-frame',{detail:packet}));
   const lost=(tracking.cards||[]).filter(c=>!c.visible||c.status==='temporarily_obscured').length,unknown=(tracking.cards||[]).filter(c=>c.visible&&!c.rank).length;
-  geometryStatus.textContent=!tracking.fresh?'Live card tracking unavailable':lost?'Card briefly obscured — holding its last visible position':unknown?'Reading '+unknown+' card'+(unknown===1?'':'s')+'…':'Live card positions';
+  geometryStatus.textContent=!tracking.fresh?'Live card tracking unavailable':lost?'Card briefly obscured — holding its last visible position':unknown?'Reading '+unknown+' card'+(unknown===1?'':'s')+'…':tracking.rejected_objects?'Raised object detected · not classified as a card':'Live card positions';
   geometryStatus.title='Camera-space positions and corners. Alignment with arm bases is approximate: camera-to-arm calibration is missing.';
-  if(tracking.fresh){geometryStatus.textContent+=' · arm alignment approximate';if(tracking.cards.some(c=>c.visible))readReason.textContent=unknown?'Checking visible card identities…':'';}
+  if(tracking.fresh){geometryStatus.textContent+=' · arm alignment approximate';if(tracking.cards.some(c=>c.visible))readReason.textContent=unknown?'Checking visible card identities…':'';else if(tracking.rejected_objects)readReason.textContent='Raised or non-card object: no card identity assigned.';}
  }catch{geometryStatus.textContent='Live card tracking offline';}finally{trackingPolling=false;}
 }
 window.addEventListener('camera-view-mode',()=>{geometryStatus.hidden=!window.cameraViewing;});

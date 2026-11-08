@@ -1,5 +1,6 @@
 import {createScene} from './scene.js';
 import './top-camera.js';
+import './foley.js';
 const $=id=>document.getElementById(id);
 let game=null,view=null,busy=false,drawing=false,bet=2500,operatorToken=null,dismissedToken=null;
 const dollars=v=>new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:v%100?2:0}).format(v/100);
@@ -23,7 +24,7 @@ function render(){
  $('chips').hidden=!open;
  for(const chip of $('chips').querySelectorAll('button')){chip.classList.toggle('selected',Number(chip.dataset.bet)*100===bet);chip.disabled=locked||!open;}
  $('details-button').firstChild.textContent=(window.cameraViewing?'Camera · '+(window.cameraReadStatus||'reading'):game.mode==='practice'?'Practice':'Observation')+' · movement off ';
- $('mode-note').textContent=window.cameraViewing?(window.transferReplay?'Capture-time arm pose · card attachment schematic':'Camera-read cards · live arm pose · no scoring'):game.mode==='practice'?'Practice cards · Live arm pose · Movement disabled':'Physical observations · Movement disabled';
+ $('mode-note').textContent=window.cameraViewing?(window.transferReplay?'Capture-time arm pose · card attachment schematic':'Camera-read cards · live arm pose · no scoring'):game.mode==='practice'?'Practice animation · Movement disabled':'Physical observations · Movement disabled';
  $('running-count').textContent=game.running_count;$('true-count').textContent=game.true_count?.toFixed(1)??'—';$('cut-status').textContent=game.shoe.cut_reached?'Reached · shuffle after this round':'At '+game.shoe.cut_at+' cards remaining';
  $('mode').textContent=game.mode==='practice'?'Operator observation mode':'Return to practice';$('mode').disabled=$('shuffle').disabled=!open||locked;
  if(view)view.sync(game);

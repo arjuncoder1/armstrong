@@ -21,7 +21,8 @@ export function loadURDF(xml,geometries,material){
  for(const joint of doc.querySelectorAll('robot > joint')){
   const parent=links[joint.querySelector('parent').getAttribute('link')],child=links[joint.querySelector('child').getAttribute('link')];
   const frame=new THREE.Group();transform(frame,joint.querySelector('origin'));parent.add(frame);frame.add(child);childNames.add(child.name);
-  joints[joint.getAttribute('name')]={frame,child,type:joint.getAttribute('type'),axis:new THREE.Vector3(...values(joint.querySelector('axis')?.getAttribute('xyz'),'1 0 0'))};
+  const limit=joint.querySelector('limit');
+  joints[joint.getAttribute('name')]={lower:Number(limit?.getAttribute('lower')||-Math.PI*2),upper:Number(limit?.getAttribute('upper')||Math.PI*2),frame,child,type:joint.getAttribute('type'),axis:new THREE.Vector3(...values(joint.querySelector('axis')?.getAttribute('xyz'),'1 0 0'))};
  }
  const roots=Object.keys(links).filter(n=>!childNames.has(n));if(roots.length!==1)throw Error('Invalid station model root');
  function update(q){for(const [name,j] of Object.entries(joints)){const n=Number(name.replace('joint',''))-1;const v=Number.isFinite(q[n])?q[n]:0;if(j.type==='revolute')j.child.quaternion.setFromAxisAngle(j.axis,v);else if(j.type==='prismatic')j.child.position.copy(j.axis).multiplyScalar(v);}links[roots[0]].updateMatrixWorld(true);}

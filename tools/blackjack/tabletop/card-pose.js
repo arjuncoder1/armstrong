@@ -2,7 +2,7 @@
 // preserves camera positions/perspective. No calibrated camera→arm transform
 // exists at this station; this projection must never be used to move a robot.
 import * as THREE from './vendor/three.module.min.js';
-export function imagePoint([x,y]) { return new THREE.Vector3(-1.16675+1.6*x,.88-1.2*y,.0007); }
+export function imagePoint([x,y]) { return new THREE.Vector3(-.87075+1.008*x,.70-.756*y,.0007); }
 export function poseFromCorners(mesh,corners){
  if(!Array.isArray(corners)||corners.length!==4||corners.some(p=>p.length!==2||!p.every(Number.isFinite)))return false;
  const q=corners.map(imagePoint),center=q.reduce((p,v)=>p.add(v),new THREE.Vector3()).multiplyScalar(.25);
