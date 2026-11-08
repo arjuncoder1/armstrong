@@ -3,6 +3,7 @@
     uv run main.py                                   # voice agent, console mode
     uv run main.py voice connect --room portal-voice
     uv run main.py robot --parked                    # any portal-makermods peer, with its own args
+    uv run main.py stack [--dream]                   # this Mac: local LiveKit + Manifest bridge + :8787/token
     uv run main.py control status                    # one-shot RPC to the rig (src/armstrong/control.py)
 
 From code: `from armstrong.robot import MakerModsRobot` (see src/armstrong/robot.py).
