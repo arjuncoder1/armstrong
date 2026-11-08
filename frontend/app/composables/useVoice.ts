@@ -116,7 +116,11 @@ export function useVoice() {
     const identity = `user-${Math.random().toString(36).slice(2, 6)}`
     try {
       const q = new URLSearchParams({ identity, room: roomName.value, agent: AGENT_NAME })
+      // Deployed with ARMSTRONG_ACCESS_CODE: open the page as ...?code=<it> (server/api/token.get.ts).
+      const code = new URLSearchParams(location.search).get('code')
+      if (code) q.set('code', code)
       const res = await fetch(`${config.public.tokenUrl}?${q}`)
+      if (res.status === 401) throw new Error('access code required: open this page with ?code=<access code>')
       if (!res.ok) throw new Error(`token endpoint ${res.status}`)
       const { url, token } = await res.json() as { url: string, token: string }
 

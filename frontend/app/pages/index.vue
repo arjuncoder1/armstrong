@@ -12,6 +12,10 @@ const busy = ref(false)
 const robotHere = computed(() => participants.value.includes(ROBOT_IDENTITY))
 const dreamHere = computed(() => participants.value.includes(DREAM_IDENTITY))
 const connected = computed(() => state.value === 'connected')
+const canControl = computed(() => connected.value && dreamHere.value)
+function setTask() {
+  if (canControl.value && !busy.value && task.value.trim()) dream(RPC.setTask, { task: task.value.trim() })
+}
 
 // video elements
 const videoEls: Partial<Record<Camera, HTMLVideoElement>> = {}
@@ -84,7 +88,6 @@ onMounted(() => {
 })
 onBeforeUnmount(() => clearInterval(timer))
 
-const stateColor = computed(() => connected.value ? 'success' : state.value === 'error' ? 'error' : 'warning')
 const statusRows = computed(() => {
   const s = status.value
   if (!s) return []
@@ -95,86 +98,66 @@ const statusRows = computed(() => {
 </script>
 
 <template>
-  <div class="min-h-screen bg-neutral-950 text-neutral-100 p-4 md:p-6">
-    <header class="flex flex-wrap items-center gap-3 mb-4">
-      <h1 class="text-xl font-semibold tracking-tight">Armstrong</h1>
-      <UBadge :color="stateColor" variant="subtle">{{ state }}</UBadge>
-      <UBadge :color="robotHere ? 'success' : 'neutral'" variant="subtle" icon="i-lucide-bot">robot</UBadge>
-      <UBadge :color="dreamHere ? 'success' : 'neutral'" variant="subtle" icon="i-lucide-brain">dream-1</UBadge>
-      <span class="text-xs text-neutral-500">{{ identity }} · others: {{ participants.filter(p => p !== ROBOT_IDENTITY && p !== DREAM_IDENTITY).join(', ') || 'none' }}</span>
-      <div class="flex-1" />
-      <UButton to="/voice" size="sm" color="primary" variant="soft" icon="i-lucide-mic">Voice</UButton>
-      <UButton size="sm" variant="ghost" icon="i-lucide-refresh-cw" @click="connect">Reconnect</UButton>
-    </header>
-
-    <div class="grid gap-4 lg:grid-cols-[1fr_380px]">
-      <section class="space-y-3">
-        <div v-for="row in [['overhead_camera'], ['left_wrist_camera', 'right_wrist_camera']] as Camera[][]" :key="row[0]"
-             :class="row.length > 1 ? 'grid grid-cols-2 gap-3' : ''">
-          <div v-for="cam in row" :key="cam" class="relative rounded-lg overflow-hidden bg-black border border-neutral-800 aspect-video">
-            <video :ref="el => setVideoEl(cam, el)" autoplay playsinline muted class="w-full h-full object-contain" />
-            <span class="absolute top-2 left-2 text-xs bg-black/60 px-2 py-0.5 rounded">{{ label[cam] }}</span>
-            <div v-if="!tracks[cam]" class="absolute inset-0 flex items-center justify-center text-neutral-600 text-sm">no video</div>
+  <WorkspaceShell title="Control room" description="A clear view. Every move in your hands.">
+    <template #actions>
+      <span class="connection-state" :class="{ online: connected }"><i />{{ connected ? 'Connected' : state === 'connecting' ? 'Connecting' : 'Disconnected' }}</span>
+      <button class="icon-button" aria-label="Reconnect" :disabled="state === 'connecting'" @click="connect"><UIcon name="i-lucide-refresh-cw" /></button>
+    </template>
+    <div class="control-layout">
+      <section class="vision-section" aria-label="Camera feeds">
+        <div class="section-title"><h2>Robot vision</h2><span>{{ CAMERAS.filter(cam => tracks[cam]).length }} of 3 cameras live</span></div>
+        <div class="camera-grid">
+          <div v-for="cam in CAMERAS" :key="cam" class="camera-frame" :class="{ 'camera-main': cam === 'overhead_camera' }">
+            <div class="camera-surface">
+              <video :ref="el => setVideoEl(cam, el)" autoplay playsinline muted />
+              <div v-if="!tracks[cam]" class="camera-placeholder">
+                <span class="viewfinder"><UIcon name="i-lucide-video" /></span>
+                <strong>{{ connected ? 'Waiting for camera' : 'Your view starts here' }}</strong>
+                <p>{{ connected ? 'Video will appear when the feed is available.' : 'Connect the robot to see its perspective.' }}</p>
+              </div>
+              <span class="feed-state" :class="{ live: tracks[cam] }"><i />{{ tracks[cam] ? 'Live' : 'No signal' }}</span>
+            </div>
+            <div class="camera-caption"><span><UIcon :name="cam === 'overhead_camera' ? 'i-lucide-scan' : 'i-lucide-hand'" />{{ label[cam] }}</span><span>{{ cam === 'overhead_camera' ? 'Workspace view' : 'Wrist view' }}</span></div>
           </div>
         </div>
+        <section class="activity-section">
+          <div class="section-title"><h2>Activity</h2><span>{{ log.length }} events</span></div>
+          <div class="event-list">
+            <div v-for="(e, i) in log" :key="i" class="event-row" :class="e.level"><UIcon :name="e.level === 'error' ? 'i-lucide-circle-alert' : e.level === 'ok' ? 'i-lucide-check' : 'i-lucide-arrow-right'" /><p>{{ e.msg }}</p><time>{{ e.t }}</time></div>
+            <div v-if="!log.length" class="quiet-empty"><UIcon name="i-lucide-list" /><span>Ready when you are. Session activity will appear here.</span></div>
+          </div>
+        </section>
       </section>
-
-      <aside class="space-y-4">
-        <UCard>
-          <template #header><span class="font-medium">Task</span></template>
-          <div class="space-y-3">
-            <UInput v-model="task" class="w-full" placeholder="pick up the card" @keydown.enter="dream(RPC.setTask, { task })" />
-            <div class="grid grid-cols-3 gap-2">
-              <UButton block variant="soft" :loading="busy" @click="dream(RPC.setTask, { task })">Set task</UButton>
-              <UButton block color="success" icon="i-lucide-play" @click="start">Start</UButton>
-              <UButton block color="warning" variant="soft" icon="i-lucide-pause" @click="dream(RPC.pause)">Pause</UButton>
-            </div>
-            <UButton block size="xl" color="error" icon="i-lucide-octagon-x" class="h-16 text-lg font-bold justify-center" @click="stop">STOP</UButton>
-            <div class="grid grid-cols-3 gap-2">
-              <UButton block variant="outline" color="neutral" @click="park">Park arms</UButton>
-              <UButton block variant="outline" color="neutral" @click="home">Home arms</UButton>
-              <UButton block variant="outline" color="neutral" @click="dream(RPC.toTeleop)">To teleop</UButton>
-            </div>
+      <aside class="command-panel">
+        <div class="command-heading"><h2>Command center</h2><UIcon name="i-lucide-sliders-horizontal" /></div>
+        <div class="command-content">
+          <div class="peer-row"><span><i :class="{ online: robotHere }" />Robot</span><b>{{ robotHere ? 'Online' : 'Offline' }}</b></div>
+          <div class="peer-row"><span><i :class="{ online: dreamHere }" />Dream-1</span><b>{{ dreamHere ? 'Online' : 'Offline' }}</b></div>
+          <form class="task-form" @submit.prevent="setTask">
+            <label for="robot-task">What should the robot do?</label>
+            <textarea id="robot-task" v-model="task" rows="3" placeholder="Describe a task…" />
+            <button class="action-button primary" type="submit" :disabled="!canControl || busy || !task.trim()"><UIcon name="i-lucide-arrow-up-right" />{{ busy ? 'Sending…' : 'Set task' }}</button>
+            <p class="field-help">{{ canControl ? 'Set a task, then start when the workspace is clear.' : 'Connect Robot and Dream-1 to begin.' }}</p>
+          </form>
+          <div class="playback-controls">
+            <button class="action-button secondary" :disabled="!canControl || busy" @click="start"><UIcon name="i-lucide-play" />Start</button>
+            <button class="action-button secondary" :disabled="!canControl" @click="stop"><UIcon name="i-lucide-pause" />Pause</button>
           </div>
-        </UCard>
-
-        <UCard>
-          <template #header>
-            <div class="flex items-center justify-between">
-              <span class="font-medium">Dream-1 status</span>
-              <UBadge v-if="status" :color="status.driving ? 'success' : 'neutral'" variant="subtle">
-                {{ status.driving ? 'driving' : 'not driving' }}
-              </UBadge>
-            </div>
-          </template>
-          <p v-if="statusError" class="text-sm text-amber-400 mb-2">{{ statusError }}</p>
-          <dl v-if="statusRows.length" class="text-sm grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
-            <template v-for="r in statusRows" :key="r.k">
-              <dt class="text-neutral-500">{{ r.k }}</dt><dd class="break-all">{{ r.v }}</dd>
-            </template>
-          </dl>
-          <p v-else-if="!statusError" class="text-sm text-neutral-500">waiting for status…</p>
-        </UCard>
-
-        <UCard :ui="{ body: 'p-0 sm:p-0' }">
-          <template #header><span class="font-medium">Event log</span></template>
-          <div class="max-h-72 overflow-y-auto font-mono text-xs p-3 space-y-1">
-            <div v-for="(e, i) in log" :key="i" :class="{ 'text-red-400': e.level === 'error', 'text-emerald-400': e.level === 'ok', 'text-neutral-400': e.level === 'info' }">
-              <span class="text-neutral-600">{{ e.t }}</span> {{ e.msg }}
-            </div>
-            <div v-if="!log.length" class="text-neutral-600">no events</div>
-          </div>
-        </UCard>
+          <button class="stop-button" @click="stop"><UIcon name="i-lucide-octagon-x" /><span>STOP</span><span>Pause Dream-1</span></button>
+          <div class="panel-divider" />
+          <h3>Arm controls</h3>
+          <div class="arm-controls"><button :disabled="!connected || !robotHere" @click="park"><UIcon name="i-lucide-parking-circle" />Park arms</button><button :disabled="!connected || !robotHere" @click="home"><UIcon name="i-lucide-house" />Home arms</button></div>
+          <button class="teleop-button" :disabled="!canControl || busy" @click="dream(RPC.toTeleop)">Switch to teleoperation<UIcon name="i-lucide-arrow-right" /></button>
+        </div>
+        <section class="policy-status">
+          <div class="section-title"><h3>Dream-1 status</h3><span v-if="status" class="connection-state" :class="{ online: status.driving }"><i />{{ status.driving ? 'Driving' : 'Idle' }}</span></div>
+          <p v-if="statusError" class="inline-error">{{ statusError }}</p>
+          <dl v-if="statusRows.length" class="status-list"><template v-for="r in statusRows" :key="r.k"><dt>{{ r.k.replaceAll('_', ' ') }}</dt><dd>{{ r.v }}</dd></template></dl>
+          <p v-else-if="!statusError" class="field-help">{{ connected ? 'Waiting for a status update.' : 'Status will appear once connected.' }}</p>
+        </section>
       </aside>
     </div>
-
-    <UModal v-model:open="confirmOpen" :title="confirmCfg?.title" :description="confirmCfg?.desc">
-      <template #footer>
-        <div class="flex gap-2 justify-end w-full">
-          <UButton color="neutral" variant="ghost" @click="confirmOpen = false">Cancel</UButton>
-          <UButton color="error" @click="confirmYes">Yes, hands clear</UButton>
-        </div>
-      </template>
-    </UModal>
-  </div>
+    <details class="session-details"><summary>Session details</summary><p>{{ identity }} · Other participants: {{ participants.filter(p => p !== ROBOT_IDENTITY && p !== DREAM_IDENTITY).join(', ') || 'none' }}</p></details>
+    <UModal v-model:open="confirmOpen" :title="confirmCfg?.title" :description="confirmCfg?.desc"><template #footer><div class="flex gap-2 justify-end w-full"><UButton color="neutral" variant="ghost" @click="confirmOpen = false">Cancel</UButton><UButton color="error" @click="confirmYes">Yes, hands clear</UButton></div></template></UModal>
+  </WorkspaceShell>
 </template>
