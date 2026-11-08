@@ -13,13 +13,11 @@ export default defineNuxtConfig({
     // e.g. http://amd-halo.local:8202 when the frontend runs on a laptop.
     vizApiUrl: 'http://127.0.0.1:8202',
     vizCamUrl: 'http://127.0.0.1:8204',
+    // The 3D tabletop's source folder, served live at /tabletop/ (server/routes/tabletop/[...path].ts). NUXT_TABLETOP_DIR.
+    tabletopDir: fileURLToPath(new URL('../tools/blackjack/tabletop', import.meta.url)),
     public: {
       tokenUrl: 'http://127.0.0.1:8787/token',
       room: 'armstrong-local',
     },
-  },
-  nitro: {
-    // The 3D tabletop is served straight from its source folder, so there is one copy of it.
-    publicAssets: [{ dir: fileURLToPath(new URL('../tools/blackjack/tabletop', import.meta.url)), baseURL: '/tabletop', maxAge: 0, fallthrough: true }],
   },
 })
