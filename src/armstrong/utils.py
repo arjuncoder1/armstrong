@@ -24,6 +24,11 @@ COMMANDS = {
     "control": "armstrong.control",  # ours: one-shot RPCs via armstrong.robot.MakerModsRobot
     "rig": "armstrong.rig",  # ours: Robot (receiver) + Dream-1 operator in one process
     "blackjack": "armstrong.blackjack",  # ours: blackjack, simulated deck or dealt through Manifest
+    "act": "armstrong.orchestrator",  # ours: Dream-1 moves straight through Manifest's direct plugin (no agent)
+    "stack": "armstrong.stack",  # ours: local LiveKit + Manifest bridge + token endpoint on this Mac
+    "dream": "armstrong.dream_node",  # ours: Dream-1 operator on the local LiveKit server
+    "mcp": "armstrong.mcp_server",  # ours: MCP server over Manifest (streamable HTTP or --stdio)
+    "manifest-voice": "manifest_voice_agent",  # ours: voice agent driving Manifest through the MCP server
 }
 NO_ARGPARSE = {"teleoperator"}  # entry points with no CLI parser: run_peer answers --help for them
 
@@ -61,7 +66,8 @@ def load_env() -> None:
 
     portal-makermods' own loader runs first (it also sets up its logging), but it reads the submodule's
     .env before ours, so the root files are reloaded with override: root .env and .env.local always win.
-    .env.config never overrides credentials or the shell."""
+    .env.config never overrides credentials or the shell. ARMSTRONG_ENV_FILE (set by `stack` for its children)
+    is loaded last with override, so the local LiveKit server's values beat the root .env's Cloud credentials."""
     from utils.common import load_env as portal_load_env  # portal-makermods
 
     portal_load_env()
@@ -70,6 +76,8 @@ def load_env() -> None:
             load_dotenv(path, override=True)
     if (config := REPO_ROOT / ".env.config").exists():
         load_dotenv(config, override=False)
+    if (pinned := os.environ.get("ARMSTRONG_ENV_FILE")) and Path(pinned).exists():
+        load_dotenv(pinned, override=True)
 
 
 def run_peer(name: str, args: list[str]) -> None:

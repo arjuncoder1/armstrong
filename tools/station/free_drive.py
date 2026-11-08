@@ -7,8 +7,9 @@
 Each tick, every motor of a Zero-G arm gets one MIT frame:
   - feed-forward torque = the arm's own weight at the measured pose (maker_gravity, vendored from the SDK; on this
     station the right arm's holding torque matched it: lift 3.54 vs 3.51 N.m, elbow 3.97 vs 4.22 N.m),
-  - a weak spring to an anchor the hand drags along (so it stays where it is let go), and light damping,
-  - a stiffer spring near each soft limit.
+  - a weak spring to an anchor the hand drags along (so it stays where it is let go), and light damping.
+The anchor stops at each soft limit, so past one the weak spring pulls back. An arm that already rests past a limit
+(the hold sags the left elbow 3 deg past 2.8) is not pulled at: the limits are widened to the pose Zero-G starts from.
 Engage checks the model's sign against the holding torque, then ramps over RAMP_IN_S and refuses if the arm moves.
 Every exit hands back to the normal stiff position hold at the measured pose: never limp, never home.
 Trips (stale feedback, too fast, a motor at the stop temperature, non-finite numbers) exit at once to that hold.
@@ -27,8 +28,6 @@ ENGAGE_DRIFT_DEG = 2.0     # the arm may not move more than this while engaging
 BAND_DEG = 2.0             # the anchor trails the hand by at most this
 K_SOFT = (5.0, 20.0, 15.0, 6.0, 3.0, 3.0, 1.0)     # N.m/rad, pan .. wrist_roll, gripper: k * band = the hold on release
 KD_FREE = (0.3, 0.6, 0.5, 0.15, 0.08, 0.08, 0.1)   # N.m s/rad
-WALL_DEG = 8.0             # a stiffer spring starts this far inside each soft limit
-WALL_GAIN = 0.5            # times the joint's hold kp
 FRESH_S = 0.15             # every motor must have answered within this
 MAX_SPEED_DEG_S = 150.0    # faster than a hand moves it: trip
 ENGAGE_SPEED_DEG_S = 10.0  # the arm must be still to engage
@@ -167,6 +166,7 @@ class ArmZeroG:
                 return (f"{self.names[i]}: holding {hold[i]:+.2f} N.m but the model says {g[i]:+.2f} N.m; "
                         "sign or calibration is off, refusing")
         self.t0, self.q0, self.tau0 = now, q, hold
+        self.lim = [(min(*c.limits_deg[n], q[i]), max(*c.limits_deg[n], q[i])) for i, n in enumerate(self.names)]
         self.anchor = list(q)
         self._finish("ramp_in")
         return ""
@@ -185,9 +185,9 @@ class ArmZeroG:
             return f"a motor reached {max(temp):.0f} C"
         return ""
 
-    def _send(self, i: int, p_deg: float, kp: float, kd: float, tau: float) -> None:
+    def _send(self, i: int, p_deg: float, kp: float, kd: float, tau: float, soft: bool = True) -> None:
         n, rs, bus = self.names[i], self.rs, self.bus
-        low, high = self.chain.limits_deg[n]
+        low, high = self.lim[i] if soft else self.chain.limits_deg[n]
         p_deg = max(min(low, high), min(max(low, high), p_deg)) - self.chain._turn_offset[n]
         with bus._lock:
             m = bus.motors[n]
@@ -199,16 +199,6 @@ class ArmZeroG:
             if rs.is_fault_frame(data):
                 raise rs.MotorFault(f"{bus.channel}: {n} fault word 0x{int.from_bytes(data[1:5], 'little'):08X}")
             m.state = rs.decode_feedback(data, m.model, bus._clock())
-
-    def _wall(self, i: int, q: float) -> float:
-        low, high = self.chain.limits_deg[self.names[i]]
-        kp, _ = self._hold_gains(i)
-        k = WALL_GAIN * kp
-        if q < low + WALL_DEG:
-            return k * math.radians(low + WALL_DEG - q)
-        if q > high - WALL_DEG:
-            return -k * math.radians(q - (high - WALL_DEG))
-        return 0.0
 
     def _step(self, want: bool):
         now, q, dq, age, temp = self._read()
@@ -238,9 +228,8 @@ class ArmZeroG:
                 err = q[i] - self.anchor[i]
                 if abs(err) > BAND_DEG:
                     self.anchor[i] = q[i] - math.copysign(BAND_DEG, err)
-                wall = self._wall(i, q[i]) if i < 6 else 0.0
                 tmax = self.rs.MOTOR_LIMITS[self.bus.motors[self.names[i]].model][2] * 0.9
-                self._send(i, self.anchor[i], K_SOFT[i], KD_FREE[i], max(-tmax, min(tmax, g[i] + wall)))
+                self._send(i, self.anchor[i], K_SOFT[i], KD_FREE[i], max(-tmax, min(tmax, g[i])))
         else:  # ramp_out: to the stiff hold at the anchor, which then carries the weight itself
             s = min(1.0, (now - self.t0) / RAMP_OUT_S)
             for i in range(7):
@@ -265,7 +254,7 @@ class ArmZeroG:
         try:
             for i in range(7):
                 kph, kdh = self._hold_gains(i)
-                self._send(i, q[i] + math.degrees(g[i] / kph), kph, kdh, 0.0)
+                self._send(i, q[i] + math.degrees(g[i] / kph), kph, kdh, 0.0, soft=False)  # the normal hold's limits
         finally:
             self._reseed(q, g)
         self._finish("off", why, want=False)
