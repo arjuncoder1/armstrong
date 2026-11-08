@@ -24,3 +24,5 @@ dialog{background:#121714;color:#d4d9cb;border:1px solid #525d4566;border-radius
 @media(max-height:600px) and (min-width:651px){.control-zone{bottom:12px;padding:10px 14px}.chips{display:none}.decision-controls button,.deal,.bet-control{height:46px;padding-top:10px;padding-bottom:10px}#details-button{top:8px}}
 
 .control-zone>.camera-read-reason{position:absolute;bottom:calc(100% + 14px);left:0;right:0;margin:0 auto;max-width:620px;padding:9px 15px;text-align:center;font-size:12px;line-height:1.5;color:#c6bdab;background:#111510db;border:1px solid #ffffff10;border-radius:12px;pointer-events:none}.control-zone>.camera-read-reason:empty{display:none}.camera-confirmation{padding:12px 0 16px;border-top:1px solid #ffffff12}.camera-confirmation p{margin-bottom:0}
+
+.tracking-status{font-size:11px;color:rgba(255,255,255,.46);text-align:center;margin-top:7px;pointer-events:none}

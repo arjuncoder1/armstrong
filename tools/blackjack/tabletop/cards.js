@@ -17,7 +17,7 @@ export async function createCardDeck(renderer){
  for(let y=0;y<256;y++)for(let x=0;x<256;x++){seed=(seed*1664525+1013904223)>>>0;const value=125+(seed%11)+(x%4===0?10:0)+(y%4===0?9:0);const i=(y*256+x)*4;grain.data.set([value,value,value,255],i);}
  ctx.putImageData(grain,0,0);const paper=new THREE.CanvasTexture(linen);paper.wrapS=paper.wrapT=THREE.RepeatWrapping;paper.repeat.set(3,4);
  const material=map=>new THREE.MeshPhysicalMaterial({map,color:0xfffdf6,roughness:.48,metalness:0,bumpMap:paper,bumpScale:.000025,clearcoat:.18,clearcoatRoughness:.46,sheen:.12,sheenColor:new THREE.Color(0xfff8e6),polygonOffset:true,polygonOffsetFactor:-1,polygonOffsetUnits:-1});
- const materials=new Map([...faces].map(([key,map])=>[key,material(map)]));const backMat=material(back);
+ const materials=new Map([...faces].map(([key,map])=>[key,material(map)]));const backMat=material(back),unknownMat=material(null);
  const edge=new THREE.MeshStandardMaterial({color:0xd6d0bf,roughness:.84,bumpMap:paper,bumpScale:.00002});
  const {width:w,height:h,radius:r,thickness:d}=CARD_SIZE;
  const shape=new THREE.Shape();shape.moveTo(-w/2+r,-h/2);shape.lineTo(w/2-r,-h/2);shape.quadraticCurveTo(w/2,-h/2,w/2,-h/2+r);shape.lineTo(w/2,h/2-r);shape.quadraticCurveTo(w/2,h/2,w/2-r,h/2);shape.lineTo(-w/2+r,h/2);shape.quadraticCurveTo(-w/2,h/2,-w/2,h/2-r);shape.lineTo(-w/2,-h/2+r);shape.quadraticCurveTo(-w/2,-h/2,-w/2+r,-h/2);
@@ -27,9 +27,9 @@ export async function createCardDeck(renderer){
  function make(card){
   const group=new THREE.Group();group.userData.card=card;group.userData.physicalSize=CARD_SIZE;group.scale.setScalar(CARD_DISPLAY_SCALE);
   const body=new THREE.Mesh(stock,edge);body.castShadow=true;body.receiveShadow=true;group.add(body);
-  const face=new THREE.Mesh(surface,materials.get(card.rank+card.suit)||backMat);face.position.z=d/2+.00007;face.receiveShadow=true;group.add(face);
+  const face=new THREE.Mesh(surface,materials.get(card.rank+card.suit)||(card.unknown?unknownMat:backMat));face.position.z=d/2+.00007;face.receiveShadow=true;group.add(face);
   const reverse=new THREE.Mesh(surface,backMat);reverse.rotation.y=Math.PI;reverse.position.z=-d/2-.00007;reverse.receiveShadow=true;group.add(reverse);
   return group;
  }
- return {make,faces,back,materials,size:CARD_SIZE,dispose(){surface.dispose();stock.dispose();paper.dispose();edge.dispose();backMat.dispose();for(const m of materials.values())m.dispose();for(const t of faces.values())t.dispose();back.dispose();}};
+ return {make,faces,back,materials,size:CARD_SIZE,dispose(){surface.dispose();stock.dispose();paper.dispose();edge.dispose();backMat.dispose();unknownMat.dispose();for(const m of materials.values())m.dispose();for(const t of faces.values())t.dispose();back.dispose();}};
 }

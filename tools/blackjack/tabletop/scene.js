@@ -1,4 +1,5 @@
 import * as THREE from './vendor/three.module.min.js';
+import {imagePoint,poseFromCorners} from './card-pose.js';
 import {loadURDF} from './urdf.js';
 import {createViewCamera} from './view-camera.js';
 import {createCardDeck,CARD_DISPLAY_SCALE} from './cards.js';
@@ -27,11 +28,11 @@ export async function createScene(canvas){
  }
  const navigation=createViewCamera(camera,canvas,arms);
  let telemetryAt=0,telemetryFresh=false, game=null,lastKey='',size='',animations=[];
- let cameraMode=false,transferReplay=false,lastPose=null,observation=null,observationID=null;
+ let cameraMode=false,transferReplay=false,lastPose=null,observation=null,observationID=null,tracking=null,trackingAt=0;
  const observedGroup=new THREE.Group();scene.add(observedGroup);observedGroup.visible=false;
  const cards=new Map(),observedCards=new Map(),reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
  const deck=await createCardDeck(renderer),makeCard=card=>deck.make(card);
- function removeCard(mesh){mesh.parent?.remove(mesh);if(mesh.userData.fadeMaterials)mesh.userData.fadeMaterials.forEach(m=>m.dispose());}
+ function removeCard(mesh){mesh.parent?.remove(mesh);mesh.traverse(c=>{if(c.userData.ownedGeometry)c.geometry.dispose();if(c.userData.ownedMaterial)c.material.dispose();});if(mesh.userData.fadeMaterials)mesh.userData.fadeMaterials.forEach(m=>m.dispose());}
  function fadeIn(mesh){
   if(reduce)return;
   mesh.userData.fadeMaterials=[];mesh.traverse(child=>{if(!child.isMesh)return;child.material=child.material.clone();child.material.transparent=true;child.material.opacity=0;mesh.userData.fadeMaterials.push(child.material);});
@@ -99,7 +100,8 @@ export async function createScene(canvas){
   for(const mesh of cards.values())mesh.visible=!active;
   if(!active){if(lastPose)applyPose(lastPose);return;}
   if(!result){observedGroup.visible=false;observationID=null;return;}
-  if(transferReplay)applyPose({fresh:true,measured:result.measured||{}});else if(lastPose)applyPose(lastPose);
+  if(transferReplay)applyPose({fresh:true,measured:result.measured||{}});else if(replayChanged&&lastPose)applyPose(lastPose);
+  if(!transferReplay&&tracking){track(tracking);return;}
   if(observationID===result.scan_id)return;observationID=result.scan_id;
   if(transferReplay)navigation.sample({fresh:true,measured:result.measured||{}},true);
   const seen=result.cards||[],keep=new Set();
@@ -109,8 +111,8 @@ export async function createScene(canvas){
     const face=card.rank+card.suit;occurrences[face]=(occurrences[face]||0)+1;const id=side+':'+face+':'+occurrences[face];keep.add(id);
     let mesh=observedCards.get(id);if(!mesh){mesh=makeCard({...card,id});observedCards.set(id,mesh);observedGroup.add(mesh);fadeIn(mesh);}
     const line=Math.floor(i/6),n=Math.min(6,list.length-line*6),col=i%6;
-    mesh.position.set(-.36675+(col-(n-1)/2)*.17,(side==='top'?.58:-.13)+(side==='top'?-1:1)*line*.23,.0007);
-    mesh.rotation.z=(col-(n-1)/2)*-.018;mesh.userData.observed=true;mesh.userData.cameraRow=side;
+    mesh.position.copy(imagePoint([card.x,card.y]));mesh.scale.setScalar(1);
+    mesh.rotation.z=0;mesh.userData.observed=true;mesh.userData.cameraRow=side;
    });
   }
   const transfer=result.transfer||{};
@@ -127,11 +129,38 @@ export async function createScene(canvas){
   for(const [id,mesh]of observedCards)if(!keep.has(id)){removeCard(mesh);observedCards.delete(id);}
   animations=animations.filter(a=>a.kind!=='observed'||a.mesh.parent);
  }
+ function track(data){
+  if(tracking?.captured_at!==data.captured_at)trackingAt=performance.now();tracking=data;
+  if(!cameraMode||transferReplay)return;
+  observedGroup.visible=true;const keep=new Set();
+  for(const card of data.cards||[]){
+   const id='track:'+card.id;keep.add(id);const face=(card.rank||'?')+(card.suit||'');
+   let mesh=observedCards.get(id);
+   if(mesh&&mesh.userData.face!==face){removeCard(mesh);observedCards.delete(id);mesh=null;}
+   if(!mesh){mesh=makeCard({...card,rank:card.rank||'?',suit:card.suit||'',unknown:!card.rank,id});mesh.userData.face=face;observedCards.set(id,mesh);observedGroup.add(mesh);}
+   mesh.userData.targetCorners=card.corners;
+   if(!mesh.userData.imageCorners)poseFromCorners(mesh,card.corners);
+   mesh.visible=data.fresh&&(card.visible||card.held);
+   mesh.traverse(c=>{if(!c.isMesh)return;if(!c.userData.ownedMaterial){c.material=c.material.clone();c.userData.ownedMaterial=true;}c.material.transparent=!!card.held||!!card.provisional;c.material.opacity=card.held?.35:card.provisional?.15:1;});
+   mesh.userData.observed=true;mesh.userData.tracked=true;mesh.userData.status=card.status;
+  }
+  for(const [id,mesh]of observedCards)if(!keep.has(id)){removeCard(mesh);observedCards.delete(id);}
+  animations=animations.filter(a=>a.kind!=='observed'||a.mesh.parent);
+ }
+ let lastPaint=0;
  function paint(now){
+  const elapsed=lastPaint?Math.min(.1,(now-lastPaint)/1000):.016;lastPaint=now;
+  if(cameraMode&&!transferReplay)for(const mesh of observedCards.values()){
+   const target=mesh.userData.targetCorners,current=mesh.userData.imageCorners;if(!target||!current||!mesh.visible)continue;
+   const blend=reduce?1:1-Math.exp(-elapsed*32);
+   const next=current.map((p,i)=>p.map((v,j)=>v+(target[i][j]-v)*blend));
+   if(next.some((p,i)=>p.some((v,j)=>Math.abs(v-current[i][j])>1e-6)))poseFromCorners(mesh,next);
+  }
   const w=canvas.clientWidth,h=canvas.clientHeight;if(!w||!h)return;
   const next=w+':'+h;if(size!==next){size=next;renderer.setSize(w,h,false);camera.aspect=w/h;
    camera.updateProjectionMatrix();}
   navigation.tick(now,camera.aspect);
+  if(cameraMode&&!transferReplay&&tracking&&now-trackingAt>600)observedGroup.visible=false;
   if(!transferReplay&&telemetryFresh&&performance.now()-telemetryAt>1700){telemetryFresh=false;Object.values(arms).forEach(a=>a.base.visible=false);window.dispatchEvent(new Event('pose-stale'));}
   animations=animations.filter(a=>{
    const t=Math.min(1,(now-a.start)/a.duration),ease=t*t*(3-2*t);
@@ -144,5 +173,5 @@ export async function createScene(canvas){
   renderer.render(scene,camera);
  }
  renderer.setAnimationLoop(now=>{if(!document.hidden)paint(now);});
- return {sync,pose,observe,observedGroup,navigation,deck,cards,get animations(){return animations;},get cameraMode(){return cameraMode;},arms,spec,camera,renderer,scene,get busy(){return animations.some(a=>a.kind==='practice');},dispose(){navigation.dispose();deck.dispose();renderer.setAnimationLoop(null);renderer.dispose();}};
+ return {sync,pose,observe,track,observedGroup,navigation,deck,cards,get animations(){return animations;},get cameraMode(){return cameraMode;},arms,spec,camera,renderer,scene,get busy(){return animations.some(a=>a.kind==='practice');},dispose(){navigation.dispose();deck.dispose();renderer.setAnimationLoop(null);renderer.dispose();}};
 }
