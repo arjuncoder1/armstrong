@@ -29,6 +29,9 @@ blob-report
 .env.*
 !.env.example
 
+# Local model provenance contains personal filesystem paths.
+/tools/blackjack/tabletop/model-provenance.json
+
 # Editor and OS
 .DS_Store
 .fleet
